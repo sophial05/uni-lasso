@@ -1,0 +1,1 @@
+VALID_FAMILIES = {"gaussian", "binomial", "cox"}
