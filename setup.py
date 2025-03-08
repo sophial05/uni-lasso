@@ -8,8 +8,6 @@ setup(
         "numpy",
         "pandas",
         "numba",
-        "scikit-learn",
-        "statsmodels",
         "adelie",
         "matplotlib",
         "colorama",
