@@ -8,12 +8,9 @@ Reference: https://arxiv.org/abs/2501.18360
 
 
 
-
 import numpy as np
 import pandas as pd
 from numba import jit
-from sklearn.linear_model import LogisticRegression
-import statsmodels.api as sm
 import adelie as ad
 
 
