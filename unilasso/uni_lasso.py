@@ -31,10 +31,12 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------------------
 
 class UniLassoResult(TypedDict):
-    gamma: np.ndarray
-    gamma_intercept: np.ndarray
-    beta: np.ndarray
-    beta_intercepts: np.ndarray
+    coef: np.ndarray # Coefficients of the univariate-guided lasso
+    intercept: np.ndarray # Intercept of the univariate-guided lasso
+    _gamma: np.ndarray # Coefficients of the univariate-guided lasso
+    _gamma_intercept: np.ndarray # Intercept of the univariate-guided lasso
+    _beta: np.ndarray # Coefficients of the univariate regression
+    _beta_intercepts: np.ndarray # Intercept of the univariate regression
     lasso_model: ad.grpnet
     regularizers: List[float]
     cv_plot: Optional[Callable]
@@ -310,6 +312,8 @@ def cv_unilasso(
         Dictionary containing UniLasso results.
     """
     loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, _, zero_var_idx = _prepare_unilasso_input(X, y, family, None)
+    beta_coefs_fit = beta_coefs_fit.squeeze()
+    beta_intercepts = beta_intercepts.squeeze()
 
     cv_lasso = ad.cv_grpnet(
         X=loo_fits,
@@ -334,16 +338,23 @@ def cv_unilasso(
     gamma_hat_fit = theta_hat * beta_coefs_fit
     gamma_0 = theta_0 + np.sum(theta_hat * beta_intercepts, axis=1)
 
+    gamma_0 = gamma_0[0]
+
     gamma_hat, beta_coefs = _handle_zero_variance(gamma_hat_fit, beta_coefs_fit, zero_var_idx, X.shape[1])
+    gamma_hat = gamma_hat.squeeze()
+    beta_coefs = beta_coefs.squeeze()
+
 
     if verbose:
         _print_unilasso_results(theta_hat, cv_lasso.lmdas, int(cv_lasso.best_idx))
 
     return {
-        "gamma": gamma_hat,
-        "gamma_intercept": gamma_0,
-        "beta": beta_coefs,
-        "beta_intercepts": beta_intercepts,
+        "coef": gamma_hat,
+        "intercept": gamma_0,
+        "_gamma": gamma_hat,
+        "_gamma_intercept": gamma_0,
+        "_beta": beta_coefs,
+        "_beta_intercepts": beta_intercepts,
         "lasso_model": lasso_model,
         "cv_plot": cv_lasso.plot_loss,
         "best_idx": int(cv_lasso.best_idx),
@@ -396,17 +407,23 @@ def fit_unilasso(
 
     gamma_hat_fit = theta_hat * beta_coefs_fit
     gamma_0 = theta_0 + np.sum(theta_hat * beta_intercepts, axis=1)
+    gamma_0 = gamma_0[0]
+
 
     gamma_hat, beta_coefs = _handle_zero_variance(gamma_hat_fit, beta_coefs_fit, zero_var_idx, X.shape[1])
+    gamma_hat = gamma_hat.squeeze()
+    beta_coefs = beta_coefs.squeeze()
+    beta_intercepts = beta_intercepts.squeeze()
 
     if verbose:
         _print_unilasso_results(theta_hat, regularizers)
 
     return {
-        "gamma": gamma_hat.squeeze(),
-        "gamma_intercept": gamma_0.squeeze(),
-        "beta": beta_coefs.squeeze(),
-        "beta_intercepts": beta_intercepts.squeeze(),
+        "coef": gamma_hat,
+        "intercept": gamma_0,
+        "_gamma": gamma_hat,
+        "_beta": beta_coefs,
+        "_beta_intercepts": beta_intercepts,
         "lasso_model": lasso_model,
         "regularizers": regularizers
     }

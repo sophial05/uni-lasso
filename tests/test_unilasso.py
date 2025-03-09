@@ -26,10 +26,14 @@ def test_fit_gaussian():
     y = np.random.rand(100)
     result = fit_unilasso(X, y, family="gaussian", regularizers=[0.1])
     assert isinstance(result, dict)
-    assert 'gamma' in result
-    assert 'beta' in result
-    assert result['gamma'].shape == (5,)
-    assert result['beta'].shape == (5,)
+    assert 'coef' in result
+    assert 'intercept' in result
+    assert '_gamma' in result
+    assert '_beta' in result
+    assert result['coef'].shape == (5,)
+    assert type(result['intercept']) == np.float64
+    assert result['_gamma'].shape == (5,)
+    assert result['_beta'].shape == (5,)
 
 
 
@@ -38,28 +42,40 @@ def test_fit_binomial():
     y = np.random.randint(2, size=100)
     result = fit_unilasso(X, y, family="binomial", regularizers=[0.1])
     assert isinstance(result, dict)
-    assert 'gamma' in result
-    assert 'beta' in result
-    assert result['gamma'].shape == (5,)
-    assert result['beta'].shape == (5,)
+    assert 'coef' in result
+    assert 'intercept' in result
+    assert '_gamma' in result
+    assert '_beta' in result
+    assert result['coef'].shape == (5,)
+    assert type(result['intercept']) == np.float64
+    assert result['_gamma'].shape == (5,)
+    assert result['_beta'].shape == (5,)
 
 
 def test_fit_cox():
     X, y = simulate_cox_data(n=100, p=5, seed=123)
     result = fit_unilasso(X, y, family="cox", regularizers=[0.1])
     assert isinstance(result, dict)
-    assert 'gamma' in result
-    assert 'beta' in result
-    assert result['gamma'].shape == (5, )
-    assert result['beta'].shape == (5,)
+    assert 'coef' in result
+    assert 'intercept' in result
+    assert '_gamma' in result
+    assert '_beta' in result
+    assert result['coef'].shape == (5,)
+    assert type(result['intercept']) == np.float64
+    assert result['_gamma'].shape == (5,)
+    assert result['_beta'].shape == (5,)
 
     y = pd.DataFrame(y, columns=['time', 'status'])
     result = fit_unilasso(X, y, family="cox", regularizers=[0.1])
     assert isinstance(result, dict)
-    assert 'gamma' in result
-    assert 'beta' in result
-    assert result['gamma'].shape == (5, )
-    assert result['beta'].shape == (5,)
+    assert 'coef' in result
+    assert 'intercept' in result
+    assert '_gamma' in result
+    assert '_beta' in result
+    assert result['coef'].shape == (5,)
+    assert type(result['intercept']) == np.float64
+    assert result['_gamma'].shape == (5,)
+    assert result['_beta'].shape == (5,)
 
     y = pd.DataFrame(y, columns=['time', 'trend'])
     with pytest.raises(ValueError):
@@ -72,12 +88,16 @@ def test_zero_variance():
     y = np.random.rand(100)
     result = fit_unilasso(X, y, family="gaussian", regularizers=[0.1])
     assert isinstance(result, dict)
-    assert 'gamma' in result
-    assert 'beta' in result
-    assert result['gamma'].shape == (5,)
-    assert result['beta'].shape == (5,)
-    assert result['gamma'][0] == 0
-    assert result['beta'][0] == 0
+    assert 'coef' in result
+    assert 'intercept' in result
+    assert '_gamma' in result
+    assert '_beta' in result
+    assert result['coef'].shape == (5,)
+    assert type(result['intercept']) == np.float64
+    assert result['_gamma'].shape == (5,)
+    assert result['_beta'].shape == (5,)
+    assert result['_gamma'][0] == 0
+    assert result['_beta'][0] == 0
 
     X = np.zeros((100, 5))
     with pytest.raises(ValueError):
