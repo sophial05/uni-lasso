@@ -1,2 +1,4 @@
-# uni-lasso
-Implementation of Univariate Lasso: Univariate-Guided Sparse Regression
+# uniLasso
+
+This package contains implementation of Univariate Lasso: Univariate-Guided Sparse Regression.
+
