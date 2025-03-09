@@ -104,7 +104,7 @@ def fit_univariate_regression(
                                 glm_y, 
                                 intercept=False, 
                                 lmda_path=[0.0])
-            coefs = glm_fit.betas.A
+            coefs = glm_fit.betas.toarray()
             beta_intercepts[j] = coefs[0][0]
             beta_coefs[j] = coefs[0][1]
     else:
