@@ -1,0 +1,7 @@
+numpy
+pandas
+numba
+adelie
+matplotlib
+colorama
+pytest
