@@ -51,12 +51,14 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Citation
 If you use UniLasso in your research, please cite:
+```bibtex
 @article{chatterjee2025univariate,
   title={Univariate-Guided Sparse Regression},
   author={Chatterjee, Sourav and Hastie, Trevor and Tibshirani, Robert},
   journal={arXiv preprint arXiv:2501.18360},
   year={2025}
 }
+```
 
 ## Contact
 For any questions or feedback, please contact Sophia Lu at sophialu@stanford.edu
