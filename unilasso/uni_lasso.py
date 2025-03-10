@@ -11,6 +11,7 @@ Reference: https://arxiv.org/abs/2501.18360
 import numpy as np
 import pandas as pd
 from numba import jit
+import matplotlib.pyplot as plt
 import adelie as ad
 
 
@@ -41,7 +42,7 @@ class UniLassoResultBase:
     """
 
     def __init__(self, 
-                 coef: np.ndarray, 
+                 coefs: np.ndarray, 
                  intercept: np.ndarray, 
                  family: str,
                  gamma: np.ndarray, 
@@ -54,7 +55,7 @@ class UniLassoResultBase:
         Initializes the base UniLasso result object.
 
         Parameters:
-        - coef (np.ndarray): Coefficients of the univariate-guided lasso.
+        - coefs (np.ndarray): Coefficients of the univariate-guided lasso.
         - intercept (np.ndarray): Intercept of the univariate-guided lasso.
         - family (str): Family of the response variable ('gaussian', 'binomial', 'cox').
         - gamma (np.ndarray): Hidden gamma coefficients.
@@ -64,7 +65,7 @@ class UniLassoResultBase:
         - lasso_model (ad.grpnet): The fitted Lasso model.
         - lmdas (np.ndarray): Regularization path.
         """
-        self.coef = coef
+        self.coefs = coefs
         self.intercept = intercept
         self.family = family
         self._gamma = gamma  
@@ -92,7 +93,7 @@ class UniLassoResultBase:
 
     def __repr__(self):
         """Custom string representation of the result object."""
-        return (f"{self.__class__.__name__}(coef={self.coef.shape}, "
+        return (f"{self.__class__.__name__}(coefs={self.coefs.shape}, "
                 f"intercept={self.intercept.shape}, "
                 f"lasso_model={type(self.lasso_model).__name__}, "
                 f"lmdas={self.lmdas.shape})")
@@ -111,7 +112,7 @@ class UniLassoCVResult(UniLassoResultBase):
     """
 
     def __init__(self, 
-                 coef: np.ndarray, 
+                 coefs: np.ndarray, 
                  intercept: np.ndarray, 
                  family: str,
                  gamma: np.ndarray, 
@@ -133,7 +134,7 @@ class UniLassoCVResult(UniLassoResultBase):
         - best_idx (Optional[int]): Index of the best-performing regularization parameter.
         - best_lmda (Optional[float]): Best regularization parameter.
         """
-        super().__init__(coef, intercept, family, gamma, gamma_intercept, beta, beta_intercepts, lasso_model, lmdas)
+        super().__init__(coefs, intercept, family, gamma, gamma_intercept, beta, beta_intercepts, lasso_model, lmdas)
         self.avg_losses = avg_losses
         self.cv_plot = cv_plot
         self.best_idx = best_idx
@@ -349,6 +350,8 @@ def _prepare_unilasso_input(
                 family: str, 
                 lmdas: Optional[Union[float, List[float], np.ndarray]]
 ) -> Tuple[np.ndarray, 
+           np.ndarray,
+           np.ndarray,
            np.ndarray, 
            np.ndarray, 
            ad.glm.GlmBase64, 
@@ -363,7 +366,7 @@ def _prepare_unilasso_input(
     glm_family = _get_glm_family(family, y)
     constraints = [ad.constraint.lower(b=np.zeros(1)) for _ in range(X.shape[1])]
 
-    return loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx
+    return X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx
 
 
 
@@ -386,10 +389,11 @@ def _handle_zero_variance(
             gamma_hat_fit: np.ndarray,
             beta_coefs_fit: np.ndarray,
             zero_var_idx: Optional[np.ndarray],
-            total_num_var: int
+            cur_num_var: int
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Handle zero variance features."""
     if zero_var_idx is not None and len(zero_var_idx) > 0:
+        total_num_var = cur_num_var + len(zero_var_idx)
         num_regs = gamma_hat_fit.shape[0]
         gamma_hat = np.zeros((num_regs, total_num_var))
         beta_coefs = np.zeros((num_regs, total_num_var))
@@ -467,9 +471,96 @@ def _format_output(lasso_model: ad.grpnet,
 
 
 
+def _configure_lmda_min_ratio(n: int,
+                              p: int) -> np.ndarray:
+    """Configure lambda min ratio for UniLasso."""
+    return 0.01 if n < p else 1e-3 * 1.5
+
+
+def _check_lmda_min_ratio(lmda_min_ratio: float) -> float:
+    """Check lambda min ratio for UniLasso."""
+    if lmda_min_ratio <= 0:
+        raise ValueError("Minimum regularization ratio must be positive.")
+    if lmda_min_ratio > 1:
+        raise ValueError("Minimum regularization ratio must be less than 1.")
+    return lmda_min_ratio
+    
+
+def _configure_lmda_path(X: np.ndarray, 
+                         y: np.ndarray,
+                         family: str,
+                         n_lmdas: Optional[int], 
+                         lmda_min_ratio: Optional[float]) -> np.ndarray:
+    """Configure the regularization path for UniLasso."""
+
+    n, p = X.shape
+    if n_lmdas is None:
+        n_lmdas = 100
+    
+    if lmda_min_ratio is None:
+        lmda_min_ratio = _configure_lmda_min_ratio(n, p)
+
+    assert n_lmdas > 0, "Number of regularization parameters must be positive."
+    _check_lmda_min_ratio(lmda_min_ratio)
+    
+    if family == "cox":
+        y = y[:, 0]
+
+    # Define function to standardize columns using n (not n-1)
+    def moment_sd(z):
+        return np.sqrt(np.sum((z - np.mean(z))**2) / len(z))
+
+    X_standardized = (X - np.mean(X, axis=0)) / np.apply_along_axis(moment_sd, 0, X)
+    X_standardized = np.array(X_standardized)  
+
+    # Standardize y (centering only)
+    y = y - np.mean(y)
+
+    n = X_standardized.shape[0]
+    lambda_max = np.max(np.abs(X_standardized.T @ y)) / n
+
+    lambda_path = np.exp(np.linspace(np.log(lambda_max), np.log(lambda_max * lmda_min_ratio), n_lmdas))
+
+    return lambda_path
+
+
+
+
 # ------------------------------------------------------------------------------
 # Perform cross-validation UniLasso
 # ------------------------------------------------------------------------------
+
+
+
+def plot_coef_path(unilasso_fit) -> None:
+    """
+    Plots the Lasso coefficient paths as a function of the L1 norm.
+
+    Parameters:
+    - unilasso_fit: UniLassoResult object.
+    """
+    assert isinstance(unilasso_fit, UniLassoResult), "Input must be a UniLassoResult object."
+
+    coefs, intercepts = unilasso_fit.coefs, unilasso_fit.intercept
+    if coefs.ndim == 1:
+        print("Only one regularization parameter was used. No path to plot.")
+        return
+    all_coefs = np.hstack([coefs, intercepts[:, None]]) if intercepts is not None else coefs
+    l1_norms = np.sum(np.abs(coefs), axis=1)
+
+    plt.figure(figsize=(8, 6))
+    for i in range(all_coefs.shape[1]):  # Iterate over features
+        plt.plot(l1_norms, all_coefs[:, i], label=str(i), lw=2)
+
+    plt.xlabel("L1-norm", fontsize=12)
+    plt.ylabel("Coefficients", fontsize=12)
+    plt.title("Lasso Coefficient Paths", fontsize=14)
+    plt.axhline(0, color='black', linestyle='--', linewidth=1)
+    
+    plt.show()
+
+
+
 
 
 def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoResult:
@@ -483,11 +574,11 @@ def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoResult:
         - UniLassoResult object with the best coefficients and intercept.
     """
 
-    best_coef = cv_result.coef[cv_result.best_idx].squeeze()
+    best_coef = cv_result.coefs[cv_result.best_idx].squeeze()
     best_intercept = cv_result.intercept[cv_result.best_idx].squeeze()
 
     extracted_fit = UniLassoResult(
-        coef=best_coef,
+        coefs=best_coef,
         intercept=best_intercept,
         family=cv_result.family,
         gamma=best_coef,
@@ -507,7 +598,7 @@ def cv_unilasso(
             y: np.ndarray,
             family: str = "gaussian",
             n_folds: int = 5,
-            lmda_min_ratio: float = 1e-5,
+            lmda_min_ratio: float = None,
             verbose: bool = False,
             seed: Optional[int] = None
 ) ->  UniLassoCVResult:
@@ -526,7 +617,13 @@ def cv_unilasso(
     Returns:
         Dictionary containing UniLasso results.
     """
-    loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, _, zero_var_idx = _prepare_unilasso_input(X, y, family, None)
+    if lmda_min_ratio is None:
+        lmda_min_ratio = _configure_lmda_min_ratio(X.shape[0], X.shape[1])
+
+    assert n_folds > 1, "Number of folds must be greater than 1."
+    _check_lmda_min_ratio(lmda_min_ratio)
+
+    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, _, zero_var_idx = _prepare_unilasso_input(X, y, family, None)
     fit_intercept = False if family == "cox" else True
 
     cv_lasso = ad.cv_grpnet(
@@ -558,12 +655,14 @@ def cv_unilasso(
 
     
 
-
+    cv_plot = cv_lasso.plot_loss
     if verbose:
         _print_unilasso_results(gamma_hat, cv_lasso.lmdas, int(cv_lasso.best_idx))
+        cv_plot()
+    
 
     unilasso_result = UniLassoCVResult(
-        coef=gamma_hat,
+        coefs=gamma_hat,
         intercept=gamma_0,
         family=family,
         gamma=gamma_hat,
@@ -573,7 +672,7 @@ def cv_unilasso(
         lasso_model=lasso_model,
         lmdas=cv_lasso.lmdas,
         avg_losses=cv_lasso.avg_losses,
-        cv_plot=cv_lasso.plot_loss,
+        cv_plot=cv_plot,
         best_idx=int(cv_lasso.best_idx),
         best_lmda=cv_lasso.lmdas[cv_lasso.best_idx]
     )
@@ -589,6 +688,8 @@ def fit_unilasso(
             y: np.ndarray,
             family: str = "gaussian",
             lmdas: Optional[Union[float, List[float], np.ndarray]] = None,
+            n_lmdas: Optional[int] = 100,
+            lmda_min_ratio: Optional[float] = None,
             verbose: bool = False
 ) -> UniLassoResult:
     """
@@ -599,13 +700,17 @@ def fit_unilasso(
         y: Response vector of shape (n,).
         family: Family of the response variable ('gaussian', 'binomial', 'cox').
         lmdas: Lasso regularization parameter(s).
+        n_lmdas: Number of regularization parameters to use if `lmdas` is None.
+        lmda_min_ratio: Minimum ratio of the largest to smallest regularization parameter. 
         verbose: Whether to print results.
 
     Returns:
         Dictionary containing UniLasso results.
     """
-    loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
-    assert lmdas is not None, "Regularizers must be specified for UniLasso."
+    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
+
+    if lmdas is None:
+        lmdas = _configure_lmda_path(X, y, family, n_lmdas, lmda_min_ratio)
 
     fit_intercept = False if family == "cox" else True
 
@@ -621,10 +726,13 @@ def fit_unilasso(
     glm_lmdas = np.array(lasso_model.lmdas)
 
     if not np.all(np.isin(lmdas, glm_lmdas)):
-        warn_removed_lmdas(np.setdiff1d(lmdas, glm_lmdas))
+        removed_lmdas = np.setdiff1d(lmdas, glm_lmdas)
+        removed_lmdas = np.round(removed_lmdas, 3)
+        warn_removed_lmdas(removed_lmdas)
 
-    matching_idx = np.where(np.isin(glm_lmdas, lmdas))[0]
+    matching_idx = np.where(np.isin(lmdas, glm_lmdas))[0]
     lmdas = lmdas[matching_idx]
+
 
     if len(lmdas) == 0:
         raise ValueError("No regularization strengths remain after removing invalid values")
@@ -645,7 +753,7 @@ def fit_unilasso(
         _print_unilasso_results(gamma_hat, lmdas)
 
     unilasso_result = UniLassoResult(
-        coef=gamma_hat,
+        coefs=gamma_hat,
         intercept=gamma_0,
         family=family,
         gamma=gamma_hat,
@@ -681,8 +789,8 @@ def predict(X: np.ndarray,
 
     if lmda_idx is not None:
         assert lmda_idx >= 0 and lmda_idx < len(result.lmdas), "Invalid regularization parameter index."
-        y_hat = X @ result.coef[lmda_idx] + result.intercept[lmda_idx]
+        y_hat = X @ result.coefs[lmda_idx] + result.intercept[lmda_idx]
     else:
-        y_hat = X @ result.coef.T + result.intercept 
+        y_hat = X @ result.coefs.T + result.intercept 
           
     return y_hat

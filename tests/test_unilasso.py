@@ -7,12 +7,12 @@ from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaus
 
 
 def _check_result(result, p, family):
-    assert hasattr(result, "coef")
+    assert hasattr(result, "coefs")
     assert hasattr(result, "intercept")
     assert hasattr(result, "_gamma")
     assert hasattr(result, "_beta")
 
-    assert result.coef.shape == (p,)
+    assert result.coefs.shape == (p,)
     assert type(result.intercept) == np.ndarray
     assert result._gamma.shape == (p,)
     assert result._beta.shape == (p,)
@@ -48,7 +48,7 @@ def test_fit_gaussian():
 
     X[:, 0] = 1
     result = fit_unilasso(X, y, family="gaussian", lmdas=[0.1])
-    assert result.coef[0] == 0 # First coefficient should be zero
+    assert result.coefs[0] == 0 # First coefficient should be zero
     
     _check_result(result, 5, "gaussian")
 
@@ -107,7 +107,7 @@ def _check_cv_result(result, p, family):
     assert hasattr(result, "best_idx")
     assert isinstance(result.best_idx, int)
     assert isinstance(result.lmdas, np.ndarray)
-    assert result.coef.shape == (num_lmdas, p)
+    assert result.coefs.shape == (num_lmdas, p)
 
 
 def test_cv_unilasso():
@@ -121,7 +121,7 @@ def test_cv_unilasso():
     _check_cv_result(result, 5, "gaussian")
 
     extracted_fit = extract_cv_unilasso(result)
-    assert extracted_fit.coef.shape == (5, )
+    assert extracted_fit.coefs.shape == (5, )
     assert type(extracted_fit.intercept) == np.float64
 
 
