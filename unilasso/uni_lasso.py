@@ -472,7 +472,7 @@ def _format_output(lasso_model: ad.grpnet,
 # ------------------------------------------------------------------------------
 
 
-def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoCVResult:
+def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoResult:
     """
     Extract the best coefficients and intercept from a cross-validated UniLasso result.
 
