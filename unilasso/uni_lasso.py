@@ -386,10 +386,44 @@ def _print_unilasso_results(
 
 
 
+def _format_output(lasso_model: ad.grpnet,
+                   beta_coefs_fit: np.ndarray,
+                   beta_intercepts: np.ndarray,
+                   zero_var_idx: Optional[np.ndarray],
+                   X: np.ndarray,
+                   fit_intercept: bool,
+                   reverse_indices: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Format UniLasso output."""
+    theta_hat = lasso_model.betas.toarray()
+    theta_0 = lasso_model.intercepts
+
+    beta_coefs_fit = beta_coefs_fit.squeeze()
+    beta_intercepts = beta_intercepts.squeeze()
+
+    if reverse_indices is not None:
+        theta_hat = theta_hat[reverse_indices]
+        theta_0 = theta_0[reverse_indices]
+
+
+    gamma_hat_fit = theta_hat * beta_coefs_fit
+    gamma_hat, beta_coefs = _handle_zero_variance(gamma_hat_fit, beta_coefs_fit, zero_var_idx, X.shape[1])
+    gamma_hat = gamma_hat.squeeze()
+    beta_coefs = beta_coefs.squeeze()
+
+    if fit_intercept:
+        gamma_0 = theta_0 + np.sum(theta_hat * beta_intercepts, axis=1)
+        gamma_0 = gamma_0.squeeze()
+    else:
+        gamma_0 = np.zeros(len(theta_0))
+   
+    return gamma_hat, gamma_0, beta_coefs
+
+
 
 # ------------------------------------------------------------------------------
 # Perform cross-validation UniLasso
 # ------------------------------------------------------------------------------
+
 
 def cv_unilasso(
             X: np.ndarray,
@@ -414,9 +448,6 @@ def cv_unilasso(
         Dictionary containing UniLasso results.
     """
     loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, _, zero_var_idx = _prepare_unilasso_input(X, y, family, None)
-    beta_coefs_fit = beta_coefs_fit.squeeze()
-    beta_intercepts = beta_intercepts.squeeze()
-
     fit_intercept = False if family == "cox" else True
 
     cv_lasso = ad.cv_grpnet(
@@ -425,6 +456,7 @@ def cv_unilasso(
         seed=seed,
         n_folds=n_folds,
         groups=None,
+        min_ratio=1e-4,
         intercept=fit_intercept,
         constraints=constraints,
     )
@@ -438,24 +470,18 @@ def cv_unilasso(
         constraints=constraints,
     )
 
-    theta_hat = lasso_model.betas.toarray()
-    theta_0 = lasso_model.intercepts
+    gamma_hat, gamma_0, beta_coefs = _format_output(lasso_model,
+                                                    beta_coefs_fit,
+                                                    beta_intercepts,
+                                                    zero_var_idx,
+                                                    X,
+                                                    fit_intercept)
 
-    gamma_hat_fit = theta_hat * beta_coefs_fit
-
-    if fit_intercept:
-        gamma_0 = theta_0 + np.sum(theta_hat * beta_intercepts, axis=1)
-        gamma_0 = gamma_0.squeeze()
-    else:
-        gamma_0 = np.zeros(len(theta_0))
-
-    gamma_hat, beta_coefs = _handle_zero_variance(gamma_hat_fit, beta_coefs_fit, zero_var_idx, X.shape[1])
-    gamma_hat = gamma_hat.squeeze()
-    beta_coefs = beta_coefs.squeeze()
+    
 
 
     if verbose:
-        _print_unilasso_results(theta_hat, cv_lasso.lmdas, int(cv_lasso.best_idx))
+        _print_unilasso_results(gamma_hat, cv_lasso.lmdas, int(cv_lasso.best_idx))
 
     unilasso_result = UniLassoResult(
         coef=gamma_hat,
@@ -527,25 +553,17 @@ def fit_unilasso(
     reverse_indices = np.arange(len(glm_lmdas))
     reverse_indices = reverse_indices[::-1]
 
-    theta_hat = lasso_model.betas.toarray()[reverse_indices]
-    theta_0 = lasso_model.intercepts[reverse_indices]
 
-    gamma_hat_fit = theta_hat * beta_coefs_fit
-
-    if fit_intercept:
-        gamma_0 = theta_0 + np.sum(theta_hat * beta_intercepts, axis=1)
-        gamma_0 = gamma_0.squeeze()
-    else:
-        gamma_0 = np.zeros(len(theta_0))
-
-
-    gamma_hat, beta_coefs = _handle_zero_variance(gamma_hat_fit, beta_coefs_fit, zero_var_idx, X.shape[1])
-    gamma_hat = gamma_hat.squeeze()
-    beta_coefs = beta_coefs.squeeze()
-    beta_intercepts = beta_intercepts.squeeze()
+    gamma_hat, gamma_0, beta_coefs = _format_output(lasso_model,
+                                                    beta_coefs_fit,
+                                                    beta_intercepts,
+                                                    zero_var_idx,
+                                                    X,
+                                                    fit_intercept,
+                                                    reverse_indices)
 
     if verbose:
-        _print_unilasso_results(theta_hat, lmdas)
+        _print_unilasso_results(gamma_hat, lmdas)
 
     unilasso_result = UniLassoResult(
         coef=gamma_hat,
