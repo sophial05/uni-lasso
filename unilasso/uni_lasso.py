@@ -430,6 +430,7 @@ def cv_unilasso(
             y: np.ndarray,
             family: str = "gaussian",
             n_folds: int = 5,
+            lmda_min_ratio: float = 1e-5,
             verbose: bool = False,
             seed: Optional[int] = None
 ) ->  UniLassoResult:
@@ -441,6 +442,7 @@ def cv_unilasso(
         y: Response vector of shape (n,).
         family: Family of the response variable ('gaussian', 'binomial', 'cox').
         n_folds: Number of cross-validation folds.
+        lmda_min_ratio: Minimum ratio of the largest to smallest regularization parameter.
         verbose: Whether to print results.
         seed: Random seed for reproducibility.
 
@@ -456,7 +458,7 @@ def cv_unilasso(
         seed=seed,
         n_folds=n_folds,
         groups=None,
-        min_ratio=1e-4,
+        min_ratio=lmda_min_ratio,
         intercept=fit_intercept,
         constraints=constraints,
     )
