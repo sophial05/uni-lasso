@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaussian_data, predict
+from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaussian_data, predict, extract_cv_unilasso
 
 
 
@@ -120,6 +120,10 @@ def test_cv_unilasso():
     result = cv_unilasso(X, y, family="gaussian")
     
     _check_cv_result(result, 5, "gaussian")
+
+    best_coef, best_intercept = extract_cv_unilasso(result)
+    assert best_coef.shape == (5, )
+    assert type(best_intercept) == np.float64
 
 
 def test_predict():

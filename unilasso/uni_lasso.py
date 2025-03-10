@@ -31,9 +31,13 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------------------
 
 
-class UniLassoResult:
+import numpy as np
+from typing import Optional, Callable
+import adelie as ad
+
+class UniLassoResultBase:
     """
-    Class to store results of UniLasso, encapsulating model outputs with hidden attributes.
+    Base class for UniLasso results, encapsulating model outputs.
     """
 
     def __init__(self, 
@@ -45,27 +49,20 @@ class UniLassoResult:
                  beta: np.ndarray, 
                  beta_intercepts: np.ndarray, 
                  lasso_model: ad.grpnet, 
-                 lmdas: np.ndarray, 
-                 avg_losses: Optional[np.ndarray] = None,
-                 cv_plot: Optional[Callable] = None, 
-                 best_idx: Optional[int] = None,
-                 best_lmda: Optional[float] = None):
+                 lmdas: np.ndarray):
         """
-        Initializes the UniLasso result object.
+        Initializes the base UniLasso result object.
 
         Parameters:
         - coef (np.ndarray): Coefficients of the univariate-guided lasso.
         - intercept (np.ndarray): Intercept of the univariate-guided lasso.
         - family (str): Family of the response variable ('gaussian', 'binomial', 'cox').
-        - gamma (np.ndarray): Coefficients of the univariate-guided lasso; hidden attribute to avoid confusion.
-        - gamma_intercept (np.ndarray): Intercept of the univariate-guided lasso, hidden attribute to avoid confusion.
-        - beta (np.ndarray): Coefficients of the univariate regression, hidden attribute to avoid confusion.
-        - beta_intercepts (np.ndarray): Intercept of the univariate regression, hidden attribute to avoid confusion.
+        - gamma (np.ndarray): Hidden gamma coefficients.
+        - gamma_intercept (np.ndarray): Hidden gamma intercept.
+        - beta (np.ndarray): Hidden beta coefficients.
+        - beta_intercepts (np.ndarray): Hidden beta intercepts.
         - lasso_model (ad.grpnet): The fitted Lasso model.
         - lmdas (np.ndarray): Regularization path.
-        - cv_plot (Optional[Callable]): Function to generate cross-validation plot, if available.
-        - best_idx (Optional[int]): Index of the best-performing regularization parameter.
-        - best_lmda (Optional[float]): Best regularization parameter.
         """
         self.coef = coef
         self.intercept = intercept
@@ -76,10 +73,6 @@ class UniLassoResult:
         self._beta_intercepts = beta_intercepts  
         self.lasso_model = lasso_model
         self.lmdas = lmdas
-        self.avg_losses = avg_losses
-        self.cv_plot = cv_plot
-        self.best_idx = best_idx
-        self.best_lmda = best_lmda
 
     def get_gamma(self) -> np.ndarray:
         """Returns the hidden gamma coefficients."""
@@ -99,10 +92,58 @@ class UniLassoResult:
 
     def __repr__(self):
         """Custom string representation of the result object."""
-        return (f"UniLassoResult(coef={self.coef.shape}, intercept={self.intercept.shape}, "
-                f"lasso_model={type(self.lasso_model).__name__}, lmdas={self.lmdas})")
-    
+        return (f"{self.__class__.__name__}(coef={self.coef.shape}, "
+                f"intercept={self.intercept.shape}, "
+                f"lasso_model={type(self.lasso_model).__name__}, "
+                f"lmdas={self.lmdas.shape})")
 
+
+class UniLassoResult(UniLassoResultBase):
+    """
+    Class for storing standard UniLasso results.
+    """
+    pass
+
+
+class UniLassoCVResult(UniLassoResultBase):
+    """
+    Class for storing cross-validation UniLasso results.
+    """
+
+    def __init__(self, 
+                 coef: np.ndarray, 
+                 intercept: np.ndarray, 
+                 family: str,
+                 gamma: np.ndarray, 
+                 gamma_intercept: np.ndarray, 
+                 beta: np.ndarray, 
+                 beta_intercepts: np.ndarray, 
+                 lasso_model: ad.grpnet, 
+                 lmdas: np.ndarray,
+                 avg_losses: np.ndarray, 
+                 cv_plot: Optional[Callable] = None, 
+                 best_idx: Optional[int] = None, 
+                 best_lmda: Optional[float] = None):
+        """
+        Initializes the cross-validation result object.
+
+        Additional Parameters:
+        - avg_losses (np.ndarray): Average cross-validation losses.
+        - cv_plot (Optional[Callable]): Function to generate cross-validation plot.
+        - best_idx (Optional[int]): Index of the best-performing regularization parameter.
+        - best_lmda (Optional[float]): Best regularization parameter.
+        """
+        super().__init__(coef, intercept, family, gamma, gamma_intercept, beta, beta_intercepts, lasso_model, lmdas)
+        self.avg_losses = avg_losses
+        self.cv_plot = cv_plot
+        self.best_idx = best_idx
+        self.best_lmda = best_lmda
+
+    def __repr__(self):
+        base_repr = super().__repr__()
+        return (f"{base_repr}, best_lmda={self.best_lmda}, "
+                f"best_idx={self.best_idx}, avg_losses={self.avg_losses.shape})")
+    
 
 
 @jit(nopython=True, cache=True)
@@ -363,12 +404,16 @@ def _handle_zero_variance(
 
 
 def _print_unilasso_results(
-            theta_hat: np.ndarray, 
+            gamma_hat: np.ndarray, 
             lmdas: np.ndarray, 
             best_idx: Optional[int] = None
 ) -> None:
     """Print UniLasso results."""
-    num_selected = np.sum(theta_hat != 0, axis=1)
+
+    if gamma_hat.ndim == 1:
+        num_selected = np.sum(gamma_hat != 0)
+    else:
+        num_selected = np.sum(gamma_hat != 0, axis=1)
 
     # check if interactive environment
     try:
@@ -420,9 +465,29 @@ def _format_output(lasso_model: ad.grpnet,
 
 
 
+
+
 # ------------------------------------------------------------------------------
 # Perform cross-validation UniLasso
 # ------------------------------------------------------------------------------
+
+
+def extract_cv_unilasso(cv_result: UniLassoCVResult) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Extract the best coefficients and intercept from a cross-validated UniLasso result.
+
+    Args:
+        - cv_result: UniLassoCVResult object.
+    
+    Returns:
+        - Tuple containing the best coefficients and intercept.
+    """
+
+    best_coef = cv_result.coef[cv_result.best_idx].squeeze()
+    best_intercept = cv_result.intercept[cv_result.best_idx].squeeze()
+
+    return best_coef, best_intercept
+
 
 
 def cv_unilasso(
@@ -433,7 +498,7 @@ def cv_unilasso(
             lmda_min_ratio: float = 1e-5,
             verbose: bool = False,
             seed: Optional[int] = None
-) ->  UniLassoResult:
+) ->  UniLassoCVResult:
     """
     Perform cross-validation UniLasso.
 
@@ -485,7 +550,7 @@ def cv_unilasso(
     if verbose:
         _print_unilasso_results(gamma_hat, cv_lasso.lmdas, int(cv_lasso.best_idx))
 
-    unilasso_result = UniLassoResult(
+    unilasso_result = UniLassoCVResult(
         coef=gamma_hat,
         intercept=gamma_0,
         family=family,
