@@ -472,7 +472,7 @@ def _format_output(lasso_model: ad.grpnet,
 # ------------------------------------------------------------------------------
 
 
-def extract_cv_unilasso(cv_result: UniLassoCVResult) -> Tuple[np.ndarray, np.ndarray]:
+def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoCVResult:
     """
     Extract the best coefficients and intercept from a cross-validated UniLasso result.
 
@@ -480,13 +480,25 @@ def extract_cv_unilasso(cv_result: UniLassoCVResult) -> Tuple[np.ndarray, np.nda
         - cv_result: UniLassoCVResult object.
     
     Returns:
-        - Tuple containing the best coefficients and intercept.
+        - UniLassoResult object with the best coefficients and intercept.
     """
 
     best_coef = cv_result.coef[cv_result.best_idx].squeeze()
     best_intercept = cv_result.intercept[cv_result.best_idx].squeeze()
 
-    return best_coef, best_intercept
+    extracted_fit = UniLassoResult(
+        coef=best_coef,
+        intercept=best_intercept,
+        family=cv_result.family,
+        gamma=best_coef,
+        gamma_intercept=best_intercept,
+        beta=cv_result._beta,
+        beta_intercepts=cv_result._beta_intercepts,
+        lasso_model=cv_result.lasso_model,
+        lmdas=cv_result.lmdas
+    )
+
+    return extracted_fit
 
 
 

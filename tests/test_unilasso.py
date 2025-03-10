@@ -118,12 +118,11 @@ def test_cv_unilasso():
         cv_unilasso(X, y, family='gaussian', lmdas=[0.1])
         
     result = cv_unilasso(X, y, family="gaussian")
-    
     _check_cv_result(result, 5, "gaussian")
 
-    best_coef, best_intercept = extract_cv_unilasso(result)
-    assert best_coef.shape == (5, )
-    assert type(best_intercept) == np.float64
+    extracted_fit = extract_cv_unilasso(result)
+    assert extracted_fit.coef.shape == (5, )
+    assert type(extracted_fit.intercept) == np.float64
 
 
 def test_predict():
