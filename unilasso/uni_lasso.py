@@ -39,6 +39,7 @@ class UniLassoResult:
     def __init__(self, 
                  coef: np.ndarray, 
                  intercept: np.ndarray, 
+                 family: str,
                  gamma: np.ndarray, 
                  gamma_intercept: np.ndarray, 
                  beta: np.ndarray, 
@@ -55,6 +56,7 @@ class UniLassoResult:
         Parameters:
         - coef (np.ndarray): Coefficients of the univariate-guided lasso.
         - intercept (np.ndarray): Intercept of the univariate-guided lasso.
+        - family (str): Family of the response variable ('gaussian', 'binomial', 'cox').
         - gamma (np.ndarray): Coefficients of the univariate-guided lasso; hidden attribute to avoid confusion.
         - gamma_intercept (np.ndarray): Intercept of the univariate-guided lasso, hidden attribute to avoid confusion.
         - beta (np.ndarray): Coefficients of the univariate regression, hidden attribute to avoid confusion.
@@ -67,6 +69,7 @@ class UniLassoResult:
         """
         self.coef = coef
         self.intercept = intercept
+        self.family = family
         self._gamma = gamma  
         self._gamma_intercept = gamma_intercept  
         self._beta = beta  
@@ -204,6 +207,33 @@ def fit_univariate_models(
     return loo_fits, beta_intercepts, beta_coefs
 
 
+def _format_unilasso_feature_matrix(X: np.ndarray,
+                                    remove_zero_var: bool = True) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Format and validate feature matrix for UniLasso."""
+
+    X = np.array(X, dtype=float)
+    if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+        raise ValueError("X contains NaN or infinite values.")
+
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim != 2:
+        raise ValueError("X must be a 1D or 2D NumPy array.")
+
+    if remove_zero_var:
+        zero_var_idx = np.where(np.var(X, axis=0) == 0)[0]
+        if len(zero_var_idx) > 0:
+            warn_zero_variance(len(zero_var_idx), X.shape[1])
+            X = np.delete(X, zero_var_idx, axis=1)
+            if X.shape[1] == 0:
+                raise ValueError("All features have zero variance.")
+    else:
+        zero_var_idx = None
+    
+    return X, zero_var_idx
+
+
+
 def _format_unilasso_input(
             X: np.ndarray, 
             y: np.ndarray, 
@@ -214,22 +244,7 @@ def _format_unilasso_input(
     if family not in VALID_FAMILIES:
         raise ValueError(f"Family must be one of {VALID_FAMILIES}")
     
-    X = np.array(X, dtype=float)
-    if np.any(np.isnan(X)) or np.any(np.isinf(X)):
-        raise ValueError("X contains NaN or infinite values.")
-
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-    elif X.ndim != 2:
-        raise ValueError("X must be a 1D or 2D NumPy array.")
-
-    zero_var_idx = np.where(np.var(X, axis=0) == 0)[0]
-    if len(zero_var_idx) > 0:
-        warn_zero_variance(len(zero_var_idx), X.shape[1])
-        X = np.delete(X, zero_var_idx, axis=1)
-        if X.shape[1] == 0:
-            raise ValueError("All features have zero variance.")
-
+    X, zero_var_idx = _format_unilasso_feature_matrix(X, True)
     y = _format_y(y, family)
 
     if X.shape[0] != y.shape[0]:
@@ -445,6 +460,7 @@ def cv_unilasso(
     unilasso_result = UniLassoResult(
         coef=gamma_hat,
         intercept=gamma_0,
+        family=family,
         gamma=gamma_hat,
         gamma_intercept=gamma_0,
         beta=beta_coefs,
@@ -534,6 +550,7 @@ def fit_unilasso(
     unilasso_result = UniLassoResult(
         coef=gamma_hat,
         intercept=gamma_0,
+        family=family,
         gamma=gamma_hat,
         gamma_intercept=gamma_0,
         beta=beta_coefs,
@@ -543,3 +560,32 @@ def fit_unilasso(
     )
 
     return unilasso_result
+
+
+def predict(X: np.ndarray, 
+            result: UniLassoResult,
+            lmda_idx: Optional[int] = None) -> np.ndarray:
+    """
+    Predict response variable using UniLasso model.
+
+    Args:
+        X: Feature matrix of shape (n, p).
+        result: UniLasso result object.
+        lmda_idx: Index of the regularization parameter to use for prediction.
+
+    Returns:
+        Predicted response variable.
+    """
+
+    if not type(result) == UniLassoResult:
+        raise ValueError("`result` must be a UniLassoResult object.")
+    
+    X, _ = _format_unilasso_feature_matrix(X, remove_zero_var=False)
+
+    if lmda_idx is not None:
+        assert lmda_idx >= 0 and lmda_idx < len(result.lmdas), "Invalid regularization parameter index."
+        y_hat = X @ result.coef[lmda_idx] + result.intercept[lmda_idx]
+    else:
+        y_hat = X @ result.coef.T + result.intercept 
+          
+    return y_hat

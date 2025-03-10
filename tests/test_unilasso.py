@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data
+from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaussian_data, predict
 
 
 
@@ -111,8 +111,7 @@ def _check_cv_result(result, p, family):
 
 
 def test_cv_unilasso():
-    X = np.random.rand(100, 5)
-    y = np.random.rand(100)
+    X, y = simulate_gaussian_data(n=100, p=5, seed=123)
 
     # Test extra arguments for cv_unilasso
     with pytest.raises(TypeError) as excinfo:
@@ -122,3 +121,12 @@ def test_cv_unilasso():
     
     _check_cv_result(result, 5, "gaussian")
 
+
+def test_predict():
+    X, y = simulate_gaussian_data(n=100, p=5)
+    result = fit_unilasso(X, y, family="gaussian", lmdas=[0.1, 0.2])
+    y_pred = predict(X, result)
+    assert y_pred.shape == (100, 2)
+
+    y_pred_lmda_1 = predict(X, result, lmda_idx=0)
+    assert y_pred_lmda_1.shape == (100, )
