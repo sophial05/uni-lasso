@@ -15,7 +15,6 @@ logger.addHandler(logging.NullHandler())
 
 # Define exported functions
 __all__ = ['fit_unilasso', 'cv_unilasso', 
-           'GAUSSIAN', 'BINOMIAL', 'COX', 'VALID_FAMILIES',
            'fit_loo_univariate_models',
            'simulate_gaussian_data', 'simulate_binomial_data', 'simulate_cox_data']
 

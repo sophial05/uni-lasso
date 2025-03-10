@@ -63,6 +63,14 @@ def warn_zero_variance(num_removed, total_features):
         warnings.warn(warning_message)
 
 
+def warn_removed_lmdas(removed_lmdas):
+    warning_message = f"Warning: The following regularization strengths were removed: {removed_lmdas}"
+    if in_interactive_mode():
+        from IPython.display import HTML, display
+        display(HTML(f'<p style="color:red; font-weight:bold;"> {warning_message}</p>'))
+    else:
+        warnings.warn(warning_message)
+
 
 
 
