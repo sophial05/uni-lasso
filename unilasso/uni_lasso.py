@@ -554,7 +554,7 @@ def plot_coef_path(unilasso_fit) -> None:
 
     plt.xlabel("L1-norm", fontsize=12)
     plt.ylabel("Coefficients", fontsize=12)
-    plt.title("Lasso Coefficient Paths", fontsize=14)
+    plt.title("UniLasso Coefficient Paths", fontsize=14)
     plt.axhline(0, color='black', linestyle='--', linewidth=1)
     
     plt.show()
