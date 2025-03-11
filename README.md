@@ -36,7 +36,7 @@ result = fit_unilasso(X, y, family='gaussian', lmdas = 0)
 
 # Print coefficients
 print("UniLasso coefficients:")
-print(result.coef)
+print(result.coefs)
 
 # Predict on data
 y_hat = predict(X, fit)
