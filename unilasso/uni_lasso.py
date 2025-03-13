@@ -635,6 +635,7 @@ def cv_unilasso(
         min_ratio=lmda_min_ratio,
         intercept=fit_intercept,
         constraints=constraints,
+        tol=1e-7
     )
 
     # refit lasso along a regularization path that stops at the best chosen lambda
@@ -709,9 +710,6 @@ def fit_unilasso(
     """
     X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
 
-    if lmdas is None:
-        lmdas = _configure_lmda_path(X, y, family, n_lmdas, lmda_min_ratio)
-
     fit_intercept = False if family == "cox" else True
 
     lasso_model = ad.grpnet(
@@ -719,8 +717,9 @@ def fit_unilasso(
         glm=glm_family,
         groups=None,
         intercept=fit_intercept,
-        lmda_path=lmdas,
+        lmda_path=lmdas, # Regularization path, if unspecified, will be generated
         constraints=constraints,
+        tol=1e-7
     )
 
     glm_lmdas = np.array(lasso_model.lmdas)
