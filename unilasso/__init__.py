@@ -1,7 +1,7 @@
 __all__ = ["fit_unilasso", "fit_loo_univariate_models"]
 
 
-from .uni_lasso import fit_unilasso, cv_unilasso, predict, extract_cv, plot_coef_path, plot_cv
+from .uni_lasso import fit_unilasso, cv_unilasso, predict, extract_cv, plot, plot_cv
 from .univariate_regression import fit_loo_univariate_models
 from .utils import setup_warnings, simulate_gaussian_data, simulate_binomial_data, simulate_cox_data
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 # Define exported functions
-__all__ = ['fit_unilasso', 'cv_unilasso', 'extract_cv', 'plot_coef_path',
+__all__ = ['fit_unilasso', 'cv_unilasso', 'extract_cv', 'plot',
            'plot_cv',
            'predict',
            'fit_loo_univariate_models',

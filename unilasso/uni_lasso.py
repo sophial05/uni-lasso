@@ -532,9 +532,13 @@ def _configure_lmda_path(X: np.ndarray,
 
 
 
-def plot_coef_path(unilasso_fit) -> None:
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot(unilasso_fit) -> None:
     """
-    Plots the Lasso coefficient paths as a function of the regularization parameter (lambda).
+    Plots the Lasso coefficient paths as a function of the regularization parameter (lambda),
+    with the number of active (nonzero) coefficients labeled at the top.
 
     Parameters:
     - unilasso_fit: UniLassoResult object containing fitted coefficients and lambda values.
@@ -546,20 +550,32 @@ def plot_coef_path(unilasso_fit) -> None:
     coefs, lambdas = unilasso_fit.coefs, unilasso_fit.lmdas
     if coefs.ndim == 1 or len(lambdas) == 1:
         print("Only one regularization parameter was used. No path to plot.")
+        return
 
     plt.figure(figsize=(8, 6))
-    log_lambdas = np.log(lambdas)  
+    log_lambdas = np.log(lambdas)  # Convert lambda values to log scale
 
+    # Compute the number of nonzero coefficients at each lambda
+    n_nonzero = np.sum(coefs != 0, axis=1)
+
+    # Plot coefficient paths
     for i in range(coefs.shape[1]):  
-        plt.plot(log_lambdas, coefs[:, i], label=f"Feature {i}", lw=2)
+        plt.plot(log_lambdas, coefs[:, i], lw=2)
 
+    # Labels and formatting
     plt.xlabel(r"$\log(\lambda)$", fontsize=12)
     plt.ylabel("Coefficients", fontsize=12)
-    plt.title("Lasso Coefficient Paths", fontsize=14)
     plt.axhline(0, color='black', linestyle='--', linewidth=1)
-    
-    plt.show()
 
+    # Add secondary x-axis for the number of active coefficients
+    ax1 = plt.gca()  
+    ax2 = ax1.twiny()  
+    ax2.set_xlim(ax1.get_xlim())  
+    ax2.set_xticks(log_lambdas[::5])  
+    ax2.set_xticklabels(n_nonzero[::5]) 
+    ax2.set_xlabel("Number of Active Coefficients", fontsize=12)
+
+    plt.show()
 
 
 def plot_cv(cv_result: UniLassoCVResult) -> None:
@@ -808,5 +824,7 @@ def predict(result: UniLassoResult,
         y_hat = X @ result.coefs[lmda_idx] + result.intercept[lmda_idx]
     else:
         y_hat = X @ result.coefs.T + result.intercept 
+
+    y_hat = y_hat.squeeze()
           
     return y_hat
