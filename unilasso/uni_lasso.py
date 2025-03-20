@@ -797,6 +797,8 @@ def predict(result: UniLassoResult,
     if not type(result) == UniLassoResult:
         raise ValueError("`result` must be a UniLassoResult object.")
     
+    if len(result.coefs.shape) == 1:
+        result.coefs = np.expand_dims(result.coefs, axis=0)
     assert result.coefs.shape[1] == X.shape[1], "Feature matrix must have the same number of columns as the fitted model."
 
     X, _ = _format_unilasso_feature_matrix(X, remove_zero_var=False)

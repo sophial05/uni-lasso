@@ -31,12 +31,24 @@ from unilasso import *
 # Generate some example data
 X, y = simulate_gaussian_data(n = 100, p = 5)
 
-# Fit UniLasso model
-result = fit_unilasso(X, y, family='gaussian', lmdas = 0)
+# Fit UniLasso model using default lambda path
+result = fit_unilasso(X, y, family='gaussian', lmdas = None)
+plot_coef_path(result)
+
+# Run UniLasso model using CV and plot CV error curve
+cv_fit = cv_unilasso(X, y, family='gaussian')
+plot_cv(cv_fit)
+# extract the best cv model to use for prediction
+extracted_fit = extract_cv(cv_fit)
+
+# Generate some test data
+X_test, y_test = simulate_gaussian_data(n = 100, p = 5)
+# predict on test data
+y_pred = predict(extracted_fit, X_test)
 
 # Print coefficients
 print("UniLasso coefficients:")
-print(result.coefs)
+print(extracted_fit.coefs)
 
 # Predict on data
 y_hat = predict(X, fit)

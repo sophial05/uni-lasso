@@ -138,3 +138,10 @@ def test_predict():
 
     y_pred_lmda_1 = predict(result, X, lmda_idx=0)
     assert y_pred_lmda_1.shape == (100, )
+
+    # Test invalid dimension
+    X, y = simulate_cox_data(n=100, p=5)
+    result = fit_unilasso(X, y, family="cox", lmdas=[0.1, 0.2])
+    X_test, y_test = simulate_cox_data(n=100, p=10)
+    with pytest.raises(AssertionError):
+        y_pred = predict(result, X_test)  # X_test has different number of features
