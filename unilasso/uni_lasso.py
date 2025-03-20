@@ -474,7 +474,7 @@ def _format_output(lasso_model: ad.grpnet,
 def _configure_lmda_min_ratio(n: int,
                               p: int) -> np.ndarray:
     """Configure lambda min ratio for UniLasso."""
-    return 0.01 if n < p else 1e-3 * 1.5
+    return 0.01 if n < p else 1e-4
 
 
 def _check_lmda_min_ratio(lmda_min_ratio: float) -> float:
@@ -534,36 +534,44 @@ def _configure_lmda_path(X: np.ndarray,
 
 def plot_coef_path(unilasso_fit) -> None:
     """
-    Plots the Lasso coefficient paths as a function of the L1 norm.
+    Plots the Lasso coefficient paths as a function of the regularization parameter (lambda).
 
     Parameters:
-    - unilasso_fit: UniLassoResult object.
+    - unilasso_fit: UniLassoResult object containing fitted coefficients and lambda values.
     """
-    assert isinstance(unilasso_fit, UniLassoResult), "Input must be a UniLassoResult object."
+    
+    assert hasattr(unilasso_fit, "coefs") and hasattr(unilasso_fit, "lmdas"), \
+        "Input must have 'coefs' and 'lmdas' attributes."
 
-    coefs, intercepts = unilasso_fit.coefs, unilasso_fit.intercept
-    if coefs.ndim == 1:
+    coefs, lambdas = unilasso_fit.coefs, unilasso_fit.lmdas
+    if coefs.ndim == 1 or len(lambdas) == 1:
         print("Only one regularization parameter was used. No path to plot.")
-        return
-    all_coefs = np.hstack([coefs, intercepts[:, None]]) if intercepts is not None else coefs
-    l1_norms = np.sum(np.abs(coefs), axis=1)
 
     plt.figure(figsize=(8, 6))
-    for i in range(all_coefs.shape[1]):  # Iterate over features
-        plt.plot(l1_norms, all_coefs[:, i], label=str(i), lw=2)
+    log_lambdas = np.log(lambdas)  
 
-    plt.xlabel("L1-norm", fontsize=12)
+    for i in range(coefs.shape[1]):  
+        plt.plot(log_lambdas, coefs[:, i], label=f"Feature {i}", lw=2)
+
+    plt.xlabel(r"$\log(\lambda)$", fontsize=12)
     plt.ylabel("Coefficients", fontsize=12)
-    plt.title("UniLasso Coefficient Paths", fontsize=14)
+    plt.title("Lasso Coefficient Paths", fontsize=14)
     plt.axhline(0, color='black', linestyle='--', linewidth=1)
     
     plt.show()
 
 
 
+def plot_cv(cv_result: UniLassoCVResult) -> None:
+    """
+    Plots the cross-validation
+    curve as a function of the regularization parameter (lambda).
+    """
+    cv_result.cv_plot()
 
 
-def extract_cv_unilasso(cv_result: UniLassoCVResult) -> UniLassoResult:
+
+def extract_cv(cv_result: UniLassoCVResult) -> UniLassoResult:
     """
     Extract the best coefficients and intercept from a cross-validated UniLasso result.
 
@@ -690,7 +698,7 @@ def fit_unilasso(
             family: str = "gaussian",
             lmdas: Optional[Union[float, List[float], np.ndarray]] = None,
             n_lmdas: Optional[int] = 100,
-            lmda_min_ratio: Optional[float] = None,
+            lmda_min_ratio: Optional[float] = 1e-2,
             verbose: bool = False
 ) -> UniLassoResult:
     """
@@ -712,6 +720,7 @@ def fit_unilasso(
 
     fit_intercept = False if family == "cox" else True
 
+
     lasso_model = ad.grpnet(
         X=loo_fits,
         glm=glm_family,
@@ -719,19 +728,23 @@ def fit_unilasso(
         intercept=fit_intercept,
         lmda_path=lmdas, # Regularization path, if unspecified, will be generated
         constraints=constraints,
+        lmda_path_size=n_lmdas,
+        min_ratio=lmda_min_ratio,
         tol=1e-7
     )
 
     glm_lmdas = np.array(lasso_model.lmdas)
 
-    if not np.all(np.isin(lmdas, glm_lmdas)):
-        removed_lmdas = np.setdiff1d(lmdas, glm_lmdas)
-        removed_lmdas = np.round(removed_lmdas, 3)
-        warn_removed_lmdas(removed_lmdas)
+    if lmdas is not None:
+        if not np.all(np.isin(lmdas, glm_lmdas)):
+            removed_lmdas = np.setdiff1d(lmdas, glm_lmdas)
+            removed_lmdas = np.round(removed_lmdas, 3)
+            warn_removed_lmdas(removed_lmdas)
 
-    matching_idx = np.where(np.isin(lmdas, glm_lmdas))[0]
-    lmdas = lmdas[matching_idx]
-
+        matching_idx = np.where(np.isin(lmdas, glm_lmdas))[0]
+        lmdas = lmdas[matching_idx]
+    else:
+        lmdas = glm_lmdas
 
     if len(lmdas) == 0:
         raise ValueError("No regularization strengths remain after removing invalid values")
@@ -766,15 +779,15 @@ def fit_unilasso(
     return unilasso_result
 
 
-def predict(X: np.ndarray, 
-            result: UniLassoResult,
+def predict(result: UniLassoResult,
+            X: np.ndarray, 
             lmda_idx: Optional[int] = None) -> np.ndarray:
     """
     Predict response variable using UniLasso model.
 
     Args:
-        X: Feature matrix of shape (n, p).
         result: UniLasso result object.
+        X: Feature matrix of shape (n, p).
         lmda_idx: Index of the regularization parameter to use for prediction.
 
     Returns:
@@ -784,8 +797,10 @@ def predict(X: np.ndarray,
     if not type(result) == UniLassoResult:
         raise ValueError("`result` must be a UniLassoResult object.")
     
-    X, _ = _format_unilasso_feature_matrix(X, remove_zero_var=False)
+    assert result.coefs.shape[1] == X.shape[1], "Feature matrix must have the same number of columns as the fitted model."
 
+    X, _ = _format_unilasso_feature_matrix(X, remove_zero_var=False)
+    
     if lmda_idx is not None:
         assert lmda_idx >= 0 and lmda_idx < len(result.lmdas), "Invalid regularization parameter index."
         y_hat = X @ result.coefs[lmda_idx] + result.intercept[lmda_idx]

@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaussian_data, predict, extract_cv_unilasso
+from unilasso import fit_unilasso, cv_unilasso, simulate_cox_data, simulate_gaussian_data, predict, extract_cv
 
 
 
@@ -39,6 +39,11 @@ def test_different_families(family):
     result = fit_unilasso(X, y, family=family, lmdas=[0.1])
     _check_result(result, 5, family)
 
+
+def test_default_lmda():
+    X = np.random.rand(100, 5)
+    y = np.random.rand(100)
+    result = fit_unilasso(X, y, family="gaussian")
 
 
 def test_fit_gaussian():
@@ -120,7 +125,7 @@ def test_cv_unilasso():
     result = cv_unilasso(X, y, family="gaussian")
     _check_cv_result(result, 5, "gaussian")
 
-    extracted_fit = extract_cv_unilasso(result)
+    extracted_fit = extract_cv(result)
     assert extracted_fit.coefs.shape == (5, )
     assert type(extracted_fit.intercept) == np.float64
 
@@ -128,8 +133,8 @@ def test_cv_unilasso():
 def test_predict():
     X, y = simulate_gaussian_data(n=100, p=5)
     result = fit_unilasso(X, y, family="gaussian", lmdas=[0.1, 0.2])
-    y_pred = predict(X, result)
+    y_pred = predict(result, X)
     assert y_pred.shape == (100, 2)
 
-    y_pred_lmda_1 = predict(X, result, lmda_idx=0)
+    y_pred_lmda_1 = predict(result, X, lmda_idx=0)
     assert y_pred_lmda_1.shape == (100, )
