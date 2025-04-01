@@ -49,9 +49,6 @@ y_pred = predict(extracted_fit, X_test)
 # Print coefficients
 print("UniLasso coefficients:")
 print(extracted_fit.coefs)
-
-# Predict on data
-y_hat = predict(X, fit)
 ```
 
 For a comprehensive examples on package usage, please refer to `examples/` subdirectory.
