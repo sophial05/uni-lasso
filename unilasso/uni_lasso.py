@@ -21,6 +21,7 @@ import logging
 from .univariate_regression import fit_loo_univariate_models
 from .config import VALID_FAMILIES
 from .utils import warn_zero_variance, warn_removed_lmdas
+from .solvers import _fit_numba_lasso_path
 
 
 # Configure logger
@@ -968,13 +969,28 @@ def cv_uni(
     lmda_min_ratio: Optional[float] = None,
     negative_penalty: float = 10.0,
     verbose: bool = False,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    backend: str = "numba"
 ) -> UniLassoCVResult:
     """
     创新版 UniLasso：返回标准 UniLassoCVResult，支持自定义负系数惩罚。
+
+    Parameters
+    ----------
+    backend : str, optional
+        Solver backend to use: 'numba' (default, fast) or 'pytorch' (original).
     """
     if family != "gaussian":
-        raise ValueError("PyTorch 自定义后端目前仅实现了 gaussian 家族。")
+        raise ValueError("自定义后端目前仅实现了 gaussian 家族。")
+
+    if backend not in ["numba", "pytorch"]:
+        raise ValueError("backend must be either 'numba' or 'pytorch'")
+
+    # Select solver based on backend
+    if backend == "numba":
+        _fit_lasso_path = _fit_numba_lasso_path
+    else:
+        _fit_lasso_path = _fit_pytorch_lasso_path
 
     # 1. 严格复用原版的数据准备逻辑，获取至关重要的 loo_fits
     # _prepare_unilasso_input 会处理 zero variance 特征，并计算 loo_fits
@@ -1003,7 +1019,7 @@ def cv_uni(
         X_train, X_val = loo_fits[train_idx], loo_fits[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
         
-        b_mat, int_arr = _fit_pytorch_lasso_path(X_train, y_train, lambda_path, negative_penalty, fit_intercept)
+        b_mat, int_arr = _fit_lasso_path(X_train, y_train, lambda_path, negative_penalty, fit_intercept)
         
         for i in range(len(lambda_path)):
             preds = X_val @ b_mat[i] + int_arr[i]
@@ -1013,7 +1029,7 @@ def cv_uni(
     best_lmda = lambda_path[best_idx]
 
     # 3. 在全量 LOO 特征上进行最终拟合
-    final_betas, final_intercepts = _fit_pytorch_lasso_path(loo_fits, y, lambda_path, negative_penalty, fit_intercept)
+    final_betas, final_intercepts = _fit_lasso_path(loo_fits, y, lambda_path, negative_penalty, fit_intercept)
     
     # 将最终结果装入我们的适配器
     adapter_model = PyTorchGrpnetAdapter(final_betas, final_intercepts, lambda_path)
@@ -1075,15 +1091,30 @@ def fit_uni(
     n_lmdas: Optional[int] = 100,
     lmda_min_ratio: Optional[float] = 1e-2,
     negative_penalty: float = 10.0,  # 创新点：暴露软惩罚参数
-    verbose: bool = False
+    verbose: bool = False,
+    backend: str = "numba"
 ) -> UniLassoResult:
     """
     创新版单变量引导 Lasso 回归 (fit_uni)。
     在指定的正则化路径上拟合模型，支持对负系数的自定义软惩罚。
+
+    Parameters
+    ----------
+    backend : str, optional
+        Solver backend to use: 'numba' (default, fast) or 'pytorch' (original).
     """
     # 1. 前置校验：目前我们的自定义梯度下降仅实现了高斯分布 (线性回归)
     if family != "gaussian":
-        raise ValueError("PyTorch 自定义后端目前仅实现了 gaussian 家族。")
+        raise ValueError("自定义后端目前仅实现了 gaussian 家族。")
+
+    if backend not in ["numba", "pytorch"]:
+        raise ValueError("backend must be either 'numba' or 'pytorch'")
+
+    # Select solver based on backend
+    if backend == "numba":
+        _fit_lasso_path = _fit_numba_lasso_path
+    else:
+        _fit_lasso_path = _fit_pytorch_lasso_path
 
     # 2. 数据准备与预处理
     # 这一步极其关键，它内部执行了对各个特征的单变量回归，提取出了 loo_fits
@@ -1107,13 +1138,13 @@ def fit_uni(
                     lmda_min_ratio=lmda_min_ratio # 最小跨度比例
                 )
 
-    # 4. 调用核心 PyTorch 求解器
+    # 4. 调用核心求解器
     # 充分复用我们在 cv_uni 中编写的底层逻辑！
-    betas_matrix, intercepts_array = _fit_pytorch_lasso_path(
-        X_train=loo_fits, 
-        y_train=y, 
-        lmdas=lambda_path, 
-        negative_penalty=negative_penalty, 
+    betas_matrix, intercepts_array = _fit_lasso_path(
+        X_train=loo_fits,
+        y_train=y,
+        lmdas=lambda_path,
+        negative_penalty=negative_penalty,
         fit_intercept=fit_intercept
     )
 
