@@ -10,7 +10,7 @@ Reference: https://arxiv.org/abs/2501.18360
 
 import numpy as np
 import pandas as pd
-from numba import jit
+from numba import jit, prange
 import matplotlib.pyplot as plt
 import adelie as ad
 
@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple, Union, Callable
 import logging
 
 from .univariate_regression import fit_loo_univariate_models
-from .config import VALID_FAMILIES
+from .config import VALID_FAMILIES, VALID_UNIVARIATE_MODELS
 from .utils import warn_zero_variance, warn_removed_lmdas
 from .solvers import _fit_numba_lasso_path
 
@@ -78,6 +78,62 @@ def _compute_feature_significance_weights(
     weights = 1.0 + normalized * (weight_max_scale - 1.0)
 
     return weights
+
+
+@jit(nopython=True, parallel=True, cache=True)
+def _parallel_corr_matrix(X: np.ndarray, min_var: float = 1e-8) -> np.ndarray:
+    """
+    Parallelized correlation matrix computation with low variance feature filtering.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix of shape (n_samples, n_features)
+    min_var : float
+        Minimum variance threshold, features with variance below this will have
+        correlation set to 0 to avoid numerical issues
+
+    Returns
+    -------
+    corr_matrix : np.ndarray
+        Correlation matrix of shape (n_features, n_features)
+    """
+    n_samples, n_features = X.shape
+    corr_matrix = np.zeros((n_features, n_features), dtype=np.float64)
+
+    # Precompute means and standard deviations
+    means = np.zeros(n_features, dtype=np.float64)
+    stds = np.zeros(n_features, dtype=np.float64)
+
+    for j in prange(n_features):
+        x = X[:, j]
+        mean_x = np.mean(x)
+        var_x = np.var(x)
+        means[j] = mean_x
+        if var_x < min_var:
+            stds[j] = 0.0
+        else:
+            stds[j] = np.sqrt(var_x)
+
+    # Compute correlation matrix in parallel (upper triangle only)
+    for i in prange(n_features):
+        if stds[i] == 0.0:
+            continue
+        x_centered = X[:, i] - means[i]
+        for j in range(i, n_features):
+            if stds[j] == 0.0:
+                corr_matrix[i, j] = 0.0
+                corr_matrix[j, i] = 0.0
+                continue
+            y_centered = X[:, j] - means[j]
+            cov = np.dot(x_centered, y_centered) / n_samples
+            corr = cov / (stds[i] * stds[j])
+            # Clip to [-1, 1] to avoid numerical errors
+            corr = max(min(corr, 1.0), -1.0)
+            corr_matrix[i, j] = corr
+            corr_matrix[j, i] = corr
+
+    return corr_matrix
 
 
 def _greedy_correlation_grouping(
@@ -411,7 +467,11 @@ def fit_univariate_regression(
 def fit_univariate_models(
             X: np.ndarray,
             y: np.ndarray,
-            family: str = "gaussian"
+            family: str = "gaussian",
+            univariate_model: str = "linear",
+            spline_df: int = 5,
+            spline_degree: int = 3,
+            tree_max_depth: int = 2
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit univariate least squares regression for each feature in X and compute
@@ -421,6 +481,10 @@ def fit_univariate_models(
         X: Feature matrix of shape (n, p).
         y: Response vector of shape (n,).
         family: Family of the response variable ('gaussian', 'binomial', 'multinomial', 'poisson', 'cox').
+        univariate_model: Type of univariate model to use: 'linear', 'spline', or 'tree'.
+        spline_df: Degrees of freedom for spline regression (if univariate_model="spline").
+        spline_degree: Degree of polynomial for spline regression (default: 3 for cubic).
+        tree_max_depth: Maximum depth for decision tree regression (if univariate_model="tree").
 
     Returns:
         Tuple containing:
@@ -431,6 +495,22 @@ def fit_univariate_models(
     # Ensure y is float for all families
     y_float = np.asarray(y, dtype=float)
 
+    # For nonlinear models, use the model-specific LOO fits directly
+    if univariate_model != "linear":
+        loo_result = fit_loo_univariate_models(
+            X, y_float,
+            family=family,
+            univariate_model=univariate_model,
+            spline_df=spline_df,
+            spline_degree=spline_degree,
+            tree_max_depth=tree_max_depth
+        )
+        loo_fits = loo_result["fit"]
+        beta_coefs = loo_result["beta"]
+        beta_intercepts = loo_result["beta0"]
+        return loo_fits, beta_intercepts, beta_coefs
+
+    # Linear model - original behavior
     beta_intercepts, beta_coefs = fit_univariate_regression(X, y_float, family)
 
     # For Poisson and Multinomial: use Gaussian LOO as approximation
@@ -538,26 +618,44 @@ def _format_lmdas(lmdas: Optional[Union[float, List[float], np.ndarray]]) -> Opt
 
 
 def _prepare_unilasso_input(
-                X: np.ndarray, 
-                y: np.ndarray, 
-                family: str, 
-                lmdas: Optional[Union[float, List[float], np.ndarray]]
-) -> Tuple[np.ndarray, 
+                X: np.ndarray,
+                y: np.ndarray,
+                family: str,
+                lmdas: Optional[Union[float, List[float], np.ndarray]],
+                univariate_model: str = "linear",
+                spline_df: int = 5,
+                spline_degree: int = 3,
+                tree_max_depth: int = 2
+) -> Tuple[np.ndarray,
            np.ndarray,
            np.ndarray,
-           np.ndarray, 
-           np.ndarray, 
-           ad.glm.GlmBase64, 
-           List[ad.constraint.ConstraintBase64], 
+           np.ndarray,
+           np.ndarray,
+           Optional[ad.glm.GlmBase64],
+           Optional[List[ad.constraint.ConstraintBase64]],
            Optional[np.ndarray]]:
     """Prepare input for UniLasso."""
     X, y, family, lmdas, zero_var_idx = _format_unilasso_input(X, y, family, lmdas)
 
-    loo_fits, beta_intercepts, beta_coefs_fit = fit_univariate_models(X, y, family=family)
+    loo_fits, beta_intercepts, beta_coefs_fit = fit_univariate_models(
+        X, y,
+        family=family,
+        univariate_model=univariate_model,
+        spline_df=spline_df,
+        spline_degree=spline_degree,
+        tree_max_depth=tree_max_depth
+    )
     loo_fits = np.asfortranarray(loo_fits)
 
-    glm_family = _get_glm_family(family, y)
-    constraints = [ad.constraint.lower(b=np.zeros(1)) for _ in range(X.shape[1])]
+    # Only get glm_family and constraints for families supported by adelie
+    # For poisson and multinomial, we use our custom solver and don't need these
+    # For nonlinear models (spline/tree), we also skip adelie initialization
+    if family in {"gaussian", "binomial", "cox"} and univariate_model == "linear":
+        glm_family = _get_glm_family(family, y)
+        constraints = [ad.constraint.lower(b=np.zeros(1)) for _ in range(X.shape[1])]
+    else:
+        glm_family = None
+        constraints = None
 
     return X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, constraints, lmdas, zero_var_idx
 
@@ -1077,7 +1175,8 @@ feature_weights: Optional[np.ndarray] = None,
 group_signs: Optional[np.ndarray] = None,
 group_penalty: float = 0.0,
 group_weights: Optional[np.ndarray] = None,
-family: str = "gaussian"
+family: str = "gaussian",
+momentum: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     沿着正则化路径 (lambda_path) 训练模型，利用 Warm Start 加速收敛。
@@ -1129,10 +1228,25 @@ family: str = "gaussian"
     weights = torch.zeros((n_features, 1), dtype=torch.float32, requires_grad=True)
     bias = torch.zeros(1, dtype=torch.float32, requires_grad=True)
 
-    optimizer = torch.optim.SGD([weights, bias], lr=lr)
+    # Use Nesterov only when momentum > 0
+    use_nesterov = momentum > 0
+    optimizer = torch.optim.SGD([weights, bias], lr=lr, momentum=momentum, nesterov=use_nesterov)
 
+    # Initialize momentum buffers
+    v_weights = torch.zeros_like(weights)
+    v_bias = torch.zeros_like(bias)
 
     for i, lmda in enumerate(lmdas):
+        # Reset momentum when lambda changes (warm start) if momentum is enabled
+        if momentum > 0:
+            optimizer.param_groups[0]['momentum'] = 0.5
+            for param_group in optimizer.param_groups:
+                param_group['momentum_buffer'] = None
+
+        # For early stopping: track last 3 changes
+        last_changes = torch.zeros(3)
+        change_idx = 0
+
         # 针对当前的 lambda 进行梯度下降更新 (利用了上一轮的 weights 作为起点)
         for epoch in range(max_epochs):
             optimizer.zero_grad()
@@ -1196,7 +1310,14 @@ family: str = "gaussian"
                         w_new[j, 0] = 0.0
 
                 # 检查收敛
-                if epoch > 0 and torch.max(torch.abs(w_new - weights)) < tol:
+                max_change = torch.max(torch.abs(w_new - weights))
+                last_changes[change_idx] = max_change
+                change_idx = (change_idx + 1) % 3
+
+                # Converge only if last 3 changes are all below tol
+                converged = epoch > 3 and torch.all(last_changes < tol)
+
+                if converged:
                     break
 
                 weights.copy_(w_new)
@@ -1230,12 +1351,18 @@ def cv_uni(
     enable_group_constraint: bool = False,
     corr_threshold: float = 0.7,
     group_penalty: float = 5.0,
-    max_group_size: int = 20
+    max_group_size: int = 20,
+    # 新增：非线性单变量模型参数
+    univariate_model: str = "linear",
+    spline_df: int = 5,
+    spline_degree: int = 3,
+    tree_max_depth: int = 2
 ) -> UniLassoCVResult:
     """
     GroupAdaUniLasso: 交叉验证版的全GLM家族单变量引导 Lasso 回归。
 
-    支持所有 fit_uni 的新功能：特征级自适应惩罚、组级符号一致性约束。
+    支持所有 fit_uni 的新功能：特征级自适应惩罚、组级符号一致性约束、
+    非线性单变量模型（样条、决策树）。
 
     Parameters
     ----------
@@ -1258,9 +1385,21 @@ def cv_uni(
         全局组惩罚强度 (默认5.0)
     max_group_size : int, optional
         最大组大小 (默认20)
+    univariate_model : str, optional
+        单变量模型类型: 'linear' (线性，默认), 'spline' (样条), 'tree' (决策树)
+    spline_df : int, optional
+        样条回归自由度 (univariate_model='spline' 时使用，默认5)
+    spline_degree : int, optional
+        样条多项式次数 (默认3为三次样条)
+    tree_max_depth : int, optional
+        决策树最大深度 (univariate_model='tree' 时使用，默认2)
     """
+    # 校验 univariate_model 参数
+    if univariate_model not in VALID_UNIVARIATE_MODELS:
+        raise ValueError(f"univariate_model must be one of {VALID_UNIVARIATE_MODELS}")
+
     # 向后兼容：当新功能都关闭时，回退到原有行为
-    use_original = (not adaptive_weighting) and (not enable_group_constraint)
+    use_original = (not adaptive_weighting) and (not enable_group_constraint) and (univariate_model == "linear")
 
     # 1. 前置校验
     if backend not in ["numba", "pytorch"]:
@@ -1279,7 +1418,13 @@ def cv_uni(
         _fit_lasso_path = _fit_pytorch_lasso_path
 
     # 2. 严格复用原版的数据准备逻辑，获取至关重要的 loo_fits
-    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
+    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(
+        X, y, family, lmdas,
+        univariate_model=univariate_model,
+        spline_df=spline_df,
+        spline_degree=spline_degree,
+        tree_max_depth=tree_max_depth
+    )
 
     fit_intercept = False if family == "cox" else True
 
@@ -1328,7 +1473,7 @@ def cv_uni(
     if enable_group_constraint:
         # 计算特征相关矩阵
         if len(beta_coefs_fit) > 1:
-            corr_matrix = np.corrcoef(X.T)
+            corr_matrix = _parallel_corr_matrix(X)
         else:
             corr_matrix = np.array([[1.0]])
 
@@ -1488,13 +1633,18 @@ def fit_uni(
     enable_group_constraint: bool = False,
     corr_threshold: float = 0.7,
     group_penalty: float = 5.0,
-    max_group_size: int = 20
+    max_group_size: int = 20,
+    # 新增：非线性单变量模型参数
+    univariate_model: str = "linear",
+    spline_df: int = 5,
+    spline_degree: int = 3,
+    tree_max_depth: int = 2
 ) -> UniLassoResult:
     """
     GroupAdaUniLasso: 全GLM家族升级的单变量引导 Lasso 回归。
 
     在指定的正则化路径上拟合模型，支持对负系数的自定义软惩罚、
-    特征级自适应惩罚以及组级符号一致性约束。
+    特征级自适应惩罚、组级符号一致性约束以及非线性单变量模型。
 
     Parameters
     ----------
@@ -1517,9 +1667,21 @@ def fit_uni(
         全局组惩罚强度 (默认5.0)
     max_group_size : int, optional
         最大组大小 (默认20)
+    univariate_model : str, optional
+        单变量模型类型: 'linear' (线性，默认), 'spline' (样条), 'tree' (决策树)
+    spline_df : int, optional
+        样条回归自由度 (univariate_model='spline' 时使用，默认5)
+    spline_degree : int, optional
+        样条多项式次数 (默认3为三次样条)
+    tree_max_depth : int, optional
+        决策树最大深度 (univariate_model='tree' 时使用，默认2)
     """
+    # 校验 univariate_model 参数
+    if univariate_model not in VALID_UNIVARIATE_MODELS:
+        raise ValueError(f"univariate_model must be one of {VALID_UNIVARIATE_MODELS}")
+
     # 向后兼容：当新功能都关闭时，回退到原有行为
-    use_original = (not adaptive_weighting) and (not enable_group_constraint)
+    use_original = (not adaptive_weighting) and (not enable_group_constraint) and (univariate_model == "linear")
 
     # 1. 前置校验
     if backend not in ["numba", "pytorch"]:
@@ -1538,7 +1700,13 @@ def fit_uni(
         _fit_lasso_path = _fit_pytorch_lasso_path
 
     # 2. 数据准备与预处理
-    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
+    X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(
+        X, y, family, lmdas,
+        univariate_model=univariate_model,
+        spline_df=spline_df,
+        spline_degree=spline_degree,
+        tree_max_depth=tree_max_depth
+    )
 
     fit_intercept = False if family == "cox" else True
 
@@ -1596,7 +1764,7 @@ def fit_uni(
     if enable_group_constraint:
         # 计算特征相关矩阵
         if len(beta_coefs_fit) > 1:
-            corr_matrix = np.corrcoef(X.T)
+            corr_matrix = _parallel_corr_matrix(X)
         else:
             corr_matrix = np.array([[1.0]])
 

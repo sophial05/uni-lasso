@@ -99,7 +99,8 @@ def _fit_numba_lasso_path(
     group_signs: Optional[np.ndarray] = None,
     group_penalty: float = 0.0,
     group_weights: Optional[np.ndarray] = None,
-    family: str = "gaussian"
+    family: str = "gaussian",
+    momentum: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Fit a lasso path using Numba-optimized gradient descent with warm start.
@@ -161,17 +162,36 @@ def _fit_numba_lasso_path(
     # Initialize parameters (warm start across lambdas)
     weights = np.zeros(n_features)
     bias = 0.0
+    # Initialize momentum velocities
+    v_weights = np.zeros(n_features)
+    v_bias = 0.0
 
     for i, lmda in enumerate(lmdas):
+        # Reset velocity when lambda changes (warm start for velocity)
+        v_weights *= 0.5
+        v_bias *= 0.5
+
+        # For early stopping: track last 3 changes to avoid premature stop
+        last_changes = np.zeros(3)
+        change_idx = 0
+
         for epoch in range(max_epochs):
-            # Step 1: Gradient descent on GLM loss
+            # Nesterov momentum: look ahead step
+            weights_lookahead = weights + momentum * v_weights
+            bias_lookahead = bias + momentum * v_bias
+
+            # Step 1: Gradient descent on GLM loss using lookahead weights
             grad_weights, grad_bias, _ = _compute_glm_loss_and_grad(
-                X_train, y_train, weights, bias, family
+                X_train, y_train, weights_lookahead, bias_lookahead, family
             )
 
-            # Take gradient step
-            weights_gd = weights - lr * grad_weights
-            bias_gd = bias - lr * grad_bias
+            # Update velocities
+            v_weights = momentum * v_weights - lr * grad_weights
+            v_bias = momentum * v_bias - lr * grad_bias
+
+            # Take Nesterov step
+            weights_gd = weights + v_weights
+            bias_gd = bias + v_bias
 
             # Step 2: Double asymmetric proximal operator
             w_prox = np.zeros_like(weights_gd)
@@ -206,7 +226,11 @@ def _fit_numba_lasso_path(
 
             # Check convergence based on weight change
             max_change = np.max(np.abs(w_prox - weights))
-            converged = epoch > 0 and max_change < tol
+            last_changes[change_idx] = max_change
+            change_idx = (change_idx + 1) % 3
+
+            # Converge only if last 3 changes are all below tol
+            converged = epoch > 3 and np.all(last_changes < tol)
 
             # Update weights for next iteration
             weights = w_prox
@@ -236,7 +260,8 @@ def _fit_numba_lasso_path_accelerated(
     group_signs: Optional[np.ndarray] = None,
     group_penalty: float = 0.0,
     group_weights: Optional[np.ndarray] = None,
-    family: str = "gaussian"
+    family: str = "gaussian",
+    momentum: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Accelerated version with precomputed matrices for Gaussian family.
@@ -250,7 +275,7 @@ def _fit_numba_lasso_path_accelerated(
         return _fit_numba_lasso_path(
             X_train, y_train, lmdas, negative_penalty, fit_intercept,
             lr, max_epochs, tol, feature_weights, group_signs,
-            group_penalty, group_weights, family
+            group_penalty, group_weights, family, momentum
         )
 
     n_samples, n_features = X_train.shape
@@ -277,16 +302,35 @@ def _fit_numba_lasso_path_accelerated(
     # Initialize parameters
     weights = np.zeros(n_features)
     bias = 0.0
+    # Initialize momentum velocities
+    v_weights = np.zeros(n_features)
+    v_bias = 0.0
 
     for i, lmda in enumerate(lmdas):
-        for epoch in range(max_epochs):
-            # Fast gradient computation using precomputed matrices (Gaussian only)
-            grad_weights = np.dot(XtX, weights) + bias * X_mean - Xty
-            grad_bias = np.dot(X_mean, weights) + bias - y_mean
+        # Reset velocity when lambda changes (warm start for velocity)
+        v_weights *= 0.5
+        v_bias *= 0.5
 
-            # Gradient descent step
-            weights_new = weights - lr * grad_weights
-            bias_new = bias - lr * grad_bias
+        # For early stopping: track last 3 changes to avoid premature stop
+        last_changes = np.zeros(3)
+        change_idx = 0
+
+        for epoch in range(max_epochs):
+            # Nesterov momentum: look ahead step
+            weights_lookahead = weights + momentum * v_weights
+            bias_lookahead = bias + momentum * v_bias
+
+            # Fast gradient computation using precomputed matrices (Gaussian only)
+            grad_weights = np.dot(XtX, weights_lookahead) + bias_lookahead * X_mean - Xty
+            grad_bias = np.dot(X_mean, weights_lookahead) + bias_lookahead - y_mean
+
+            # Update velocities
+            v_weights = momentum * v_weights - lr * grad_weights
+            v_bias = momentum * v_bias - lr * grad_bias
+
+            # Take Nesterov step
+            weights_new = weights + v_weights
+            bias_new = bias + v_bias
 
             # Double asymmetric proximal operator
             w_prox = np.zeros_like(weights_new)
@@ -321,7 +365,13 @@ def _fit_numba_lasso_path_accelerated(
 
             # Check convergence
             max_change = np.max(np.abs(w_prox - weights))
-            if epoch > 0 and max_change < tol:
+            last_changes[change_idx] = max_change
+            change_idx = (change_idx + 1) % 3
+
+            # Converge only if last 3 changes are all below tol
+            converged = epoch > 3 and np.all(last_changes < tol)
+
+            if converged:
                 break
 
             weights = w_prox
