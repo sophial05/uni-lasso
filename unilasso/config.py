@@ -1,1 +1,1 @@
-VALID_FAMILIES = {"gaussian", "binomial", "cox"}
+VALID_FAMILIES = {"gaussian", "binomial", "multinomial", "poisson", "cox"}

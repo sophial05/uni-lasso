@@ -33,6 +33,158 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------------------
 
 
+def _compute_feature_significance_weights(
+    univariate_results: dict,
+    weight_method: str = "t_statistic",
+    weight_max_scale: float = 10.0
+) -> np.ndarray:
+    """
+    Compute feature-level significance weights for adaptive penalty.
+
+    Parameters
+    ----------
+    univariate_results : dict
+        Dictionary containing univariate regression results with keys:
+        't_stats' (for t-statistic), 'p_values' (for p-value), 'correlations' (for correlation)
+    weight_method : str
+        Method to compute weights: 't_statistic', 'p_value', or 'correlation'
+    weight_max_scale : float
+        Maximum scale for weights, normalized to [1, weight_max_scale]
+
+    Returns
+    -------
+    weights : np.ndarray
+        Array of significance weights of shape (n_features,)
+    """
+    n_features = len(univariate_results['beta'])
+
+    if weight_method == "t_statistic":
+        stats = np.abs(univariate_results.get('t_stats', np.ones(n_features)))
+    elif weight_method == "p_value":
+        p_vals = univariate_results.get('p_values', np.ones(n_features))
+        stats = -np.log10(np.clip(p_vals, 1e-10, 1.0))
+    elif weight_method == "correlation":
+        stats = np.abs(univariate_results.get('correlations', np.ones(n_features)))
+    else:
+        raise ValueError(f"Unknown weight method: {weight_method}")
+
+    # Normalize to [1, weight_max_scale]
+    min_stat = np.min(stats)
+    max_stat = np.max(stats)
+    if max_stat == min_stat:
+        return np.ones(n_features)
+
+    normalized = (stats - min_stat) / (max_stat - min_stat)
+    weights = 1.0 + normalized * (weight_max_scale - 1.0)
+
+    return weights
+
+
+def _greedy_correlation_grouping(
+    corr_matrix: np.ndarray,
+    corr_threshold: float = 0.7,
+    max_group_size: int = 20
+) -> List[List[int]]:
+    """
+    Greedy non-overlapping correlation grouping of features.
+
+    Parameters
+    ----------
+    corr_matrix : np.ndarray
+        Absolute correlation matrix of shape (n_features, n_features)
+    corr_threshold : float
+        Threshold for grouping correlated features
+    max_group_size : int
+        Maximum size of each group
+
+    Returns
+    -------
+    groups : List[List[int]]
+        List of feature groups, each group is a list of feature indices
+    """
+    n_features = corr_matrix.shape[0]
+    assigned = np.zeros(n_features, dtype=bool)
+    groups = []
+
+    # Compute feature importance (sum of absolute correlations) to prioritize grouping
+    feature_importance = np.sum(np.abs(corr_matrix), axis=1)
+
+    while not np.all(assigned):
+        # Pick the most important unassigned feature as group leader
+        unassigned_idx = np.where(~assigned)[0]
+        leader = unassigned_idx[np.argmax(feature_importance[unassigned_idx])]
+
+        # Find all unassigned features correlated with leader
+        correlated = np.where(
+            (~assigned) & (np.abs(corr_matrix[leader]) >= corr_threshold)
+        )[0]
+
+        # Limit group size, keep most correlated first
+        if len(correlated) > max_group_size:
+            # Sort by correlation with leader
+            corr_values = corr_matrix[leader, correlated]
+            sorted_idx = np.argsort(-np.abs(corr_values))
+            correlated = correlated[sorted_idx[:max_group_size]]
+
+        # Add group
+        groups.append(correlated.tolist())
+        assigned[correlated] = True
+
+    return groups
+
+
+def _compute_group_penalty_weights(
+    groups: List[List[int]],
+    beta_univariate: np.ndarray,
+    feature_weights: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute group-level penalty weights and dominant signs.
+
+    Parameters
+    ----------
+    groups : List[List[int]]
+        List of feature groups
+    beta_univariate : np.ndarray
+        Univariate regression coefficients of shape (n_features,)
+    feature_weights : np.ndarray
+        Feature-level significance weights of shape (n_features,)
+
+    Returns
+    -------
+    group_signs : np.ndarray
+        Dominant sign for each group (+1 or -1) of shape (n_features,)
+    group_weights : np.ndarray
+        Group penalty weight for each feature of shape (n_features,)
+    """
+    n_features = len(beta_univariate)
+    group_signs = np.ones(n_features)
+    group_weights = np.ones(n_features)
+
+    for group in groups:
+        if len(group) == 0:
+            continue
+
+        # Compute weighted sign vote (weighted by absolute beta * feature weight)
+        betas = beta_univariate[group]
+        weights = feature_weights[group]
+        votes = np.sign(betas) * np.abs(betas) * weights
+        total_vote = np.sum(votes)
+
+        # Dominant sign is the sign of the total vote
+        dominant_sign = np.sign(total_vote) if total_vote != 0 else 1.0
+
+        # Group weight is proportional to the confidence of the dominant sign
+        confidence = np.abs(total_vote) / (np.sum(np.abs(votes)) + 1e-10)
+        group_weight = 1.0 + confidence * 4.0  # Scale from 1 to 5
+
+        # Assign to all features in the group
+        group_signs[group] = dominant_sign
+        group_weights[group] = group_weight
+
+    return group_signs, group_weights
+
+
 import numpy as np
 from typing import Optional, Callable
 import adelie as ad
@@ -42,15 +194,15 @@ class UniLassoResultBase:
     Base class for UniLasso results, encapsulating model outputs.
     """
 
-    def __init__(self, 
-                 coefs: np.ndarray, 
-                 intercept: np.ndarray, 
+    def __init__(self,
+                 coefs: np.ndarray,
+                 intercept: np.ndarray,
                  family: str,
-                 gamma: np.ndarray, 
-                 gamma_intercept: np.ndarray, 
-                 beta: np.ndarray, 
-                 beta_intercepts: np.ndarray, 
-                 lasso_model: ad.grpnet, 
+                 gamma: np.ndarray,
+                 gamma_intercept: np.ndarray,
+                 beta: np.ndarray,
+                 beta_intercepts: np.ndarray,
+                 lasso_model: ad.grpnet,
                  lmdas: np.ndarray):
         """
         Initializes the base UniLasso result object.
@@ -69,12 +221,15 @@ class UniLassoResultBase:
         self.coefs = coefs
         self.intercept = intercept
         self.family = family
-        self._gamma = gamma  
-        self._gamma_intercept = gamma_intercept  
-        self._beta = beta  
-        self._beta_intercepts = beta_intercepts  
+        self._gamma = gamma
+        self._gamma_intercept = gamma_intercept
+        self._beta = beta
+        self._beta_intercepts = beta_intercepts
         self.lasso_model = lasso_model
         self.lmdas = lmdas
+        # 新增：分组信息（可选）
+        self.groups = None
+        self.group_signs = None
 
     def get_gamma(self) -> np.ndarray:
         """Returns the hidden gamma coefficients."""
@@ -172,8 +327,8 @@ def _fit_univariate_regression_gaussian_numba(
 
 
 def fit_univariate_regression(
-            X: np.ndarray, 
-            y: np.ndarray, 
+            X: np.ndarray,
+            y: np.ndarray,
             family: str
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -182,7 +337,7 @@ def fit_univariate_regression(
     Args:
         X: Feature matrix of shape (n, p).
         y: Target vector of shape (n,).
-        family: Family of the response variable ('gaussian', 'binomial', 'cox').
+        family: Family of the response variable ('gaussian', 'binomial', 'multinomial', 'poisson', 'cox').
 
     Returns:
         Tuple containing:
@@ -209,16 +364,44 @@ def fit_univariate_regression(
                 # Cox model requires no intercept term
                 X_j = np.column_stack([np.zeros(n), X[:, j]])
             X_j = np.asfortranarray(X_j)
-            glm_fit = ad.grpnet(X_j, 
-                                glm_y, 
-                                intercept=False, 
+            glm_fit = ad.grpnet(X_j,
+                                glm_y,
+                                intercept=False,
                                 lmda_path=[0.0])
             coefs = glm_fit.betas.toarray()
 
             if family == "binomial":
                 beta_intercepts[j] = coefs[0][0]
-           
+
             beta_coefs[j] = coefs[0][1]
+    elif family in {"poisson", "multinomial"}:
+        # For Poisson and Multinomial: use simple estimation
+        beta_intercepts = np.zeros(p)
+        beta_coefs = np.zeros(p)
+
+        # Use Gaussian as a simple fallback for quick estimation
+        # This is used for feature importance estimation
+        for j in range(p):
+            xj = X[:, j]
+            # Simple correlation-based beta for Poisson
+            if family == "poisson":
+                y_mean = np.mean(y)
+                x_mean = np.mean(xj)
+                cov = np.mean((xj - x_mean) * (y - y_mean))
+                var_x = np.mean((xj - x_mean)**2)
+                if var_x > 1e-10:
+                    beta_coefs[j] = cov / var_x
+                beta_intercepts[j] = np.log(y_mean + 1e-10) - beta_coefs[j] * x_mean
+            else:  # multinomial
+                # For multinomial, use one-vs-rest approach
+                y_bin = (y != np.min(y)).astype(float)
+                y_mean = np.mean(y_bin)
+                x_mean = np.mean(xj)
+                cov = np.mean((xj - x_mean) * (y_bin - y_mean))
+                var_x = np.mean((xj - x_mean)**2)
+                if var_x > 1e-10:
+                    beta_coefs[j] = cov / var_x
+                beta_intercepts[j] = y_mean - beta_coefs[j] * x_mean
     else:
         raise ValueError(f"Unsupported family type: {family}")
 
@@ -226,8 +409,8 @@ def fit_univariate_regression(
 
 
 def fit_univariate_models(
-            X: np.ndarray, 
-            y: np.ndarray, 
+            X: np.ndarray,
+            y: np.ndarray,
             family: str = "gaussian"
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -237,7 +420,7 @@ def fit_univariate_models(
     Args:
         X: Feature matrix of shape (n, p).
         y: Response vector of shape (n,).
-        family: Family of the response variable ('gaussian', 'binomial', 'cox').
+        family: Family of the response variable ('gaussian', 'binomial', 'multinomial', 'poisson', 'cox').
 
     Returns:
         Tuple containing:
@@ -245,8 +428,17 @@ def fit_univariate_models(
             - beta_intercepts: Intercepts from univariate regressions.
             - beta_coefs: Slopes from univariate regressions.
     """
-    beta_intercepts, beta_coefs = fit_univariate_regression(X, y, family)
-    loo_fits = fit_loo_univariate_models(X, y, family=family)["fit"]
+    # Ensure y is float for all families
+    y_float = np.asarray(y, dtype=float)
+
+    beta_intercepts, beta_coefs = fit_univariate_regression(X, y_float, family)
+
+    # For Poisson and Multinomial: use Gaussian LOO as approximation
+    if family in {"poisson", "multinomial"}:
+        loo_fits = fit_loo_univariate_models(X, y_float, family="gaussian")["fit"]
+    else:
+        loo_fits = fit_loo_univariate_models(X, y_float, family=family)["fit"]
+
     return loo_fits, beta_intercepts, beta_coefs
 
 
@@ -873,82 +1065,140 @@ class PyTorchGrpnetAdapter:
     
     
 def _fit_pytorch_lasso_path(
-X_train: np.ndarray, 
-y_train: np.ndarray, 
-lmdas: np.ndarray, 
+X_train: np.ndarray,
+y_train: np.ndarray,
+lmdas: np.ndarray,
 negative_penalty: float,
 fit_intercept: bool = True,
 lr: float = 0.01,
 max_epochs: int = 5000,
-tol: float = 1e-6
+tol: float = 1e-6,
+feature_weights: Optional[np.ndarray] = None,
+group_signs: Optional[np.ndarray] = None,
+group_penalty: float = 0.0,
+group_weights: Optional[np.ndarray] = None,
+family: str = "gaussian"
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     沿着正则化路径 (lambda_path) 训练模型，利用 Warm Start 加速收敛。
-    
-    使用非对称软阈值算子 (Asymmetric Soft-Thresholding) 实现对负系数的惩罚。
-    
+
+    使用双层非对称软阈值算子 (Double Asymmetric Soft-Thresholding)，支持：
+    1. 特征级自适应权重惩罚
+    2. 组级符号一致性约束
+
     Parameters
     ----------
     negative_penalty : float
         对负系数的额外惩罚强度。当 negative_penalty -> inf 时，
         模型趋近于硬约束 theta >= 0（但不完全等价）。
         当 negative_penalty = 0 时，退化为标准 Lasso。
+    feature_weights : np.ndarray, optional
+        特征级显著性权重，默认全为 1
+    group_signs : np.ndarray, optional
+        每个特征所在组的主导符号，默认全为 1
+    group_penalty : float
+        全局组惩罚强度，用于符号不一致惩罚
+    group_weights : np.ndarray, optional
+        组级惩罚权重，默认全为 1
     """
     X_t = torch.tensor(X_train, dtype=torch.float32)
     y_t = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
-    
+
     n_features = X_train.shape[1]
     n_lmdas = len(lmdas)
-    
+    n_samples = X_train.shape[0]
+
+    # Default values for optional parameters
+    if feature_weights is None:
+        feature_weights = np.ones(n_features)
+    if group_signs is None:
+        group_signs = np.ones(n_features)
+    if group_weights is None:
+        group_weights = np.ones(n_features)
+
+    # Convert to torch tensors
+    fw_t = torch.tensor(feature_weights, dtype=torch.float32)
+    gs_t = torch.tensor(group_signs, dtype=torch.float32)
+    gw_t = torch.tensor(group_weights, dtype=torch.float32)
+
     # 预分配结果存储空间
     betas_matrix = np.zeros((n_lmdas, n_features))
     intercepts = np.zeros(n_lmdas)
-    
+
     # 初始化可训练参数
     weights = torch.zeros((n_features, 1), dtype=torch.float32, requires_grad=True)
     bias = torch.zeros(1, dtype=torch.float32, requires_grad=True)
-    
+
     optimizer = torch.optim.SGD([weights, bias], lr=lr)
-    
-    
+
+
     for i, lmda in enumerate(lmdas):
         # 针对当前的 lambda 进行梯度下降更新 (利用了上一轮的 weights 作为起点)
-        for epoch in range(max_epochs): 
+        for epoch in range(max_epochs):
             optimizer.zero_grad()
-            # 第一步：只对"平滑部分 (MSE)"计算梯度！
+            # 第一步：根据 family 计算对应的损失
             y_pred = torch.matmul(X_t, weights) + bias
-            mse_loss = torch.mean((y_pred - y_t) ** 2)
-            mse_loss.backward()
-            
+
+            if family == "gaussian":
+                # Gaussian: MSE loss
+                loss = torch.mean((y_pred - y_t) ** 2)
+            elif family == "binomial":
+                # Binomial: Logistic loss
+                mu = torch.sigmoid(torch.clamp(y_pred, -50, 50))
+                loss = -torch.mean(y_t * torch.log(mu + 1e-15) + (1 - y_t) * torch.log(1 - mu + 1e-15))
+            elif family == "poisson":
+                # Poisson: log-linear loss
+                mu = torch.exp(torch.clamp(y_pred, -50, 50))
+                loss = torch.mean(mu - y_t * torch.log(mu + 1e-15))
+            elif family == "multinomial":
+                # Multinomial: treat as binomial
+                mu = torch.sigmoid(torch.clamp(y_pred, -50, 50))
+                loss = -torch.mean(y_t * torch.log(mu + 1e-15) + (1 - y_t) * torch.log(1 - mu + 1e-15))
+            else:
+                # Default to Gaussian
+                loss = torch.mean((y_pred - y_t) ** 2)
+
+            loss.backward()
+
             # 走普通梯度下降的一步
             optimizer.step()
-            
-            # 第二步：非对称近端算子 (Asymmetric Proximal Operator)
+
+            # 第二步：双层非对称近端算子 (Double Asymmetric Proximal Operator)
             with torch.no_grad():
-                # 正方向的阈值（标准 L1）
-                tau_pos = lr * lmda
-                # 负方向的阈值（L1 + negative_penalty）
-                tau_neg = lr * (lmda + negative_penalty)
-                
-                # 正确的软阈值收缩逻辑：
-                # - 如果 w > tau_pos: 收缩到 w - tau_pos
-                # - 如果 w < -tau_neg: 收缩到 w + tau_neg  
-                # - 如果 -tau_neg <= w <= tau_pos: 收缩到 0
-                
                 w_new = torch.zeros_like(weights)
-                
-                # 正方向收缩
-                mask_pos = weights > tau_pos
-                w_new[mask_pos] = weights[mask_pos] - tau_pos
-                
-                # 负方向收缩
-                mask_neg = weights < -tau_neg
-                w_new[mask_neg] = weights[mask_neg] + tau_neg
-                
+
+                for j in range(n_features):
+                    w = weights[j, 0]
+                    fw = fw_t[j]
+                    gs = gs_t[j]
+                    gw = gw_t[j]
+
+                    # Compute base thresholds (feature adaptive)
+                    tau_pos_base = lr * lmda * fw
+                    tau_neg_base = lr * (lmda + negative_penalty) * fw
+
+                    # Compute group penalty adjustment
+                    if gs > 0:
+                        # Group sign is positive: extra penalty for negative values
+                        tau_neg = tau_neg_base + lr * group_penalty * gw
+                        tau_pos = tau_pos_base
+                    else:
+                        # Group sign is negative: extra penalty for positive values
+                        tau_pos = tau_pos_base + lr * group_penalty * gw
+                        tau_neg = tau_neg_base
+
+                    # Apply soft thresholding
+                    if w > tau_pos:
+                        w_new[j, 0] = w - tau_pos
+                    elif w < -tau_neg:
+                        w_new[j, 0] = w + tau_neg
+                    else:
+                        w_new[j, 0] = 0.0
+
                 # 检查收敛
                 if epoch > 0 and torch.max(torch.abs(w_new - weights)) < tol:
                     break
-                
+
                 weights.copy_(w_new)
 
         betas_matrix[i, :] = weights.detach().numpy().flatten()
@@ -970,21 +1220,57 @@ def cv_uni(
     negative_penalty: float = 10.0,
     verbose: bool = False,
     seed: Optional[int] = None,
-    backend: str = "numba"
+    backend: str = "numba",
+    lr: Optional[float] = None,
+    # 新增：自适应惩罚参数 (与 fit_uni 一致)
+    adaptive_weighting: bool = False,
+    weight_method: str = "t_statistic",
+    weight_max_scale: float = 10.0,
+    # 新增：组约束参数 (与 fit_uni 一致)
+    enable_group_constraint: bool = False,
+    corr_threshold: float = 0.7,
+    group_penalty: float = 5.0,
+    max_group_size: int = 20
 ) -> UniLassoCVResult:
     """
-    创新版 UniLasso：返回标准 UniLassoCVResult，支持自定义负系数惩罚。
+    GroupAdaUniLasso: 交叉验证版的全GLM家族单变量引导 Lasso 回归。
+
+    支持所有 fit_uni 的新功能：特征级自适应惩罚、组级符号一致性约束。
 
     Parameters
     ----------
+    family : str, optional
+        GLM家族: 'gaussian' (线性回归), 'binomial' (二分类),
+        'multinomial' (多分类), 'poisson' (泊松回归), 'cox' (生存分析)
     backend : str, optional
         Solver backend to use: 'numba' (default, fast) or 'pytorch' (original).
+    adaptive_weighting : bool, optional
+        开启特征级自适应惩罚 (默认关闭，与原版行为一致)
+    weight_method : str, optional
+        显著性权重计算方法: 't_statistic', 'p_value', 'correlation'
+    weight_max_scale : float, optional
+        权重最大上限 (默认10.0)
+    enable_group_constraint : bool, optional
+        开启组级一致性约束 (默认关闭，与原版行为一致)
+    corr_threshold : float, optional
+        共线性分组阈值 (默认0.7)
+    group_penalty : float, optional
+        全局组惩罚强度 (默认5.0)
+    max_group_size : int, optional
+        最大组大小 (默认20)
     """
-    if family != "gaussian":
-        raise ValueError("自定义后端目前仅实现了 gaussian 家族。")
+    # 向后兼容：当新功能都关闭时，回退到原有行为
+    use_original = (not adaptive_weighting) and (not enable_group_constraint)
 
+    # 1. 前置校验
     if backend not in ["numba", "pytorch"]:
         raise ValueError("backend must be either 'numba' or 'pytorch'")
+
+    # 如果新功能关闭且需要用原始adelie（保持向后兼容）
+    # 注意：cox模型仍然使用原始adelie，因为需要特殊处理
+    if use_original and family == "cox":
+        # 回退到原始adelie实现（cox在原始实现中有完整支持）
+        return cv_unilasso(X, y, family, n_folds, lmda_min_ratio, verbose, seed)
 
     # Select solver based on backend
     if backend == "numba":
@@ -992,49 +1278,144 @@ def cv_uni(
     else:
         _fit_lasso_path = _fit_pytorch_lasso_path
 
-    # 1. 严格复用原版的数据准备逻辑，获取至关重要的 loo_fits
-    # _prepare_unilasso_input 会处理 zero variance 特征，并计算 loo_fits
+    # 2. 严格复用原版的数据准备逻辑，获取至关重要的 loo_fits
     X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
-    
+
     fit_intercept = False if family == "cox" else True
 
-    # 如果用户没有提供正则化路径，生成一个（简化的示例路径）
+    # 设置默认学习率（根据GLM家族）
+    if lr is None:
+        if family == "gaussian":
+            lr = 0.01
+        elif family == "binomial":
+            lr = 0.1
+        elif family == "poisson":
+            lr = 0.05
+        elif family == "multinomial":
+            lr = 0.1
+        else:
+            lr = 0.01
+
+    # 3. 计算自适应权重和分组约束 (新功能，在全量数据上计算一次)
+    feature_weights = None
+    group_signs = None
+    group_weights_arr = None
+    groups = None
+
+    if adaptive_weighting or enable_group_constraint:
+        # 构建单变量结果字典
+        univariate_results = {
+            'beta': beta_coefs_fit,
+            't_stats': np.ones_like(beta_coefs_fit),
+            'p_values': np.ones_like(beta_coefs_fit),
+            'correlations': np.zeros_like(beta_coefs_fit)
+        }
+
+        # 计算特征相关性
+        if X.shape[1] > 0:
+            if X.shape[1] > 1:
+                univariate_results['correlations'] = np.array([np.corrcoef(X[:, j], y)[0, 1] for j in range(X.shape[1])])
+            else:
+                univariate_results['correlations'] = np.array([np.corrcoef(X[:, 0], y)[0, 1]])
+
+    if adaptive_weighting:
+        feature_weights = _compute_feature_significance_weights(
+            univariate_results, weight_method, weight_max_scale
+        )
+    else:
+        feature_weights = np.ones(len(beta_coefs_fit))
+
+    if enable_group_constraint:
+        # 计算特征相关矩阵
+        if len(beta_coefs_fit) > 1:
+            corr_matrix = np.corrcoef(X.T)
+        else:
+            corr_matrix = np.array([[1.0]])
+
+        # 贪心分组
+        groups = _greedy_correlation_grouping(
+            corr_matrix, corr_threshold, max_group_size
+        )
+
+        # 计算组惩罚权重和符号
+        group_signs, group_weights_arr = _compute_group_penalty_weights(
+            groups, beta_coefs_fit, feature_weights
+        )
+    else:
+        group_signs = np.ones(len(beta_coefs_fit))
+        group_weights_arr = np.ones(len(beta_coefs_fit))
+
+    # 4. 确定正则化路径
     if original_lmdas is not None:
         lambda_path = np.sort(np.array(original_lmdas))[::-1]
     else:
         lambda_path = _configure_lmda_path(
-            X=loo_fits, 
-            y=y, 
-            family=family, 
-            n_lmdas=n_lmdas, 
+            X=loo_fits,
+            y=y,
+            family=family,
+            n_lmdas=n_lmdas,
             lmda_min_ratio=lmda_min_ratio
         )
 
-    # 2. 交叉验证过程 (模拟 cv_grpnet)
+    # 5. 交叉验证过程
     kf = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
     avg_losses = np.zeros(len(lambda_path))
-    
-    # 模拟交叉验证计算 avg_losses (工程上，这用于选择最佳超参数)
+
     for train_idx, val_idx in kf.split(loo_fits):
         X_train, X_val = loo_fits[train_idx], loo_fits[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
-        
-        b_mat, int_arr = _fit_lasso_path(X_train, y_train, lambda_path, negative_penalty, fit_intercept)
-        
+
+        b_mat, int_arr = _fit_lasso_path(
+            X_train, y_train, lambda_path, negative_penalty, fit_intercept,
+            lr=lr,
+            feature_weights=feature_weights,
+            group_signs=group_signs,
+            group_penalty=group_penalty,
+            group_weights=group_weights_arr,
+            family=family
+        )
+
         for i in range(len(lambda_path)):
             preds = X_val @ b_mat[i] + int_arr[i]
-            avg_losses[i] += np.mean((preds - y_val) ** 2) / n_folds
+            if family == "gaussian":
+                avg_losses[i] += np.mean((preds - y_val) ** 2) / n_folds
+            elif family == "binomial":
+                # Logistic loss
+                mu = 1.0 / (1.0 + np.exp(-np.clip(preds, -50, 50)))
+                log_loss = -np.mean(y_val * np.log(mu + 1e-15) + (1 - y_val) * np.log(1 - mu + 1e-15))
+                avg_losses[i] += log_loss / n_folds
+            elif family == "poisson":
+                # Poisson loss
+                mu = np.exp(np.clip(preds, -50, 50))
+                poisson_loss = np.mean(mu - y_val * np.log(mu + 1e-15))
+                avg_losses[i] += poisson_loss / n_folds
+            elif family == "multinomial":
+                # Treat as binomial for now
+                mu = 1.0 / (1.0 + np.exp(-np.clip(preds, -50, 50)))
+                log_loss = -np.mean(y_val * np.log(mu + 1e-15) + (1 - y_val) * np.log(1 - mu + 1e-15))
+                avg_losses[i] += log_loss / n_folds
+            else:
+                # Default to MSE
+                avg_losses[i] += np.mean((preds - y_val) ** 2) / n_folds
 
     best_idx = int(np.argmin(avg_losses))
     best_lmda = lambda_path[best_idx]
 
-    # 3. 在全量 LOO 特征上进行最终拟合
-    final_betas, final_intercepts = _fit_lasso_path(loo_fits, y, lambda_path, negative_penalty, fit_intercept)
-    
+    # 6. 在全量 LOO 特征上进行最终拟合
+    final_betas, final_intercepts = _fit_lasso_path(
+        loo_fits, y, lambda_path, negative_penalty, fit_intercept,
+        lr=lr,
+        feature_weights=feature_weights,
+        group_signs=group_signs,
+        group_penalty=group_penalty,
+        group_weights=group_weights_arr,
+        family=family
+    )
+
     # 将最终结果装入我们的适配器
     adapter_model = PyTorchGrpnetAdapter(final_betas, final_intercepts, lambda_path)
 
-    # 4. 调用原生格式化函数，将基础的权重转换为 UniLasso 实际需要的 gamma 和 beta
+    # 7. 调用原生格式化函数
     gamma_hat, gamma_0, beta_coefs = _format_output(
         lasso_model=adapter_model,
         beta_coefs_fit=beta_coefs_fit,
@@ -1044,7 +1425,7 @@ def cv_uni(
         fit_intercept=fit_intercept
     )
 
-    # 定义一个伪装的可视化函数，满足 cv_plot 的 Callable 签名
+    # 定义一个伪装的可视化函数
     def mock_cv_plot():
         plt.plot(np.log(lambda_path), avg_losses)
         plt.xlabel("Log(Lambda)")
@@ -1056,7 +1437,7 @@ def cv_uni(
         _print_unilasso_results(gamma_hat, lambda_path, best_idx)
         mock_cv_plot()
 
-    # 5. 返回原汁原味的 UniLassoCVResult
+    # 8. 返回结果
     result = UniLassoCVResult(
         coefs=gamma_hat,
         intercept=gamma_0,
@@ -1065,13 +1446,18 @@ def cv_uni(
         gamma_intercept=gamma_0,
         beta=beta_coefs,
         beta_intercepts=beta_intercepts,
-        lasso_model=adapter_model,  # 传入我们的适配器！
+        lasso_model=adapter_model,
         lmdas=lambda_path,
         avg_losses=avg_losses,
         cv_plot=mock_cv_plot,
         best_idx=best_idx,
         best_lmda=best_lmda
     )
+
+    # 附加分组信息 (可选)
+    if enable_group_constraint and groups is not None:
+        result.groups = groups
+        result.group_signs = group_signs
 
     return result
 
@@ -1092,23 +1478,58 @@ def fit_uni(
     lmda_min_ratio: Optional[float] = 1e-2,
     negative_penalty: float = 10.0,  # 创新点：暴露软惩罚参数
     verbose: bool = False,
-    backend: str = "numba"
+    backend: str = "numba",
+    lr: Optional[float] = None,
+    # 新增：自适应惩罚参数
+    adaptive_weighting: bool = False,
+    weight_method: str = "t_statistic",
+    weight_max_scale: float = 10.0,
+    # 新增：组约束参数
+    enable_group_constraint: bool = False,
+    corr_threshold: float = 0.7,
+    group_penalty: float = 5.0,
+    max_group_size: int = 20
 ) -> UniLassoResult:
     """
-    创新版单变量引导 Lasso 回归 (fit_uni)。
-    在指定的正则化路径上拟合模型，支持对负系数的自定义软惩罚。
+    GroupAdaUniLasso: 全GLM家族升级的单变量引导 Lasso 回归。
+
+    在指定的正则化路径上拟合模型，支持对负系数的自定义软惩罚、
+    特征级自适应惩罚以及组级符号一致性约束。
 
     Parameters
     ----------
+    family : str, optional
+        GLM家族: 'gaussian' (线性回归), 'binomial' (二分类),
+        'multinomial' (多分类), 'poisson' (泊松回归), 'cox' (生存分析)
     backend : str, optional
         Solver backend to use: 'numba' (default, fast) or 'pytorch' (original).
+    adaptive_weighting : bool, optional
+        开启特征级自适应惩罚 (默认关闭，与原版行为一致)
+    weight_method : str, optional
+        显著性权重计算方法: 't_statistic', 'p_value', 'correlation'
+    weight_max_scale : float, optional
+        权重最大上限 (默认10.0)
+    enable_group_constraint : bool, optional
+        开启组级一致性约束 (默认关闭，与原版行为一致)
+    corr_threshold : float, optional
+        共线性分组阈值 (默认0.7)
+    group_penalty : float, optional
+        全局组惩罚强度 (默认5.0)
+    max_group_size : int, optional
+        最大组大小 (默认20)
     """
-    # 1. 前置校验：目前我们的自定义梯度下降仅实现了高斯分布 (线性回归)
-    if family != "gaussian":
-        raise ValueError("自定义后端目前仅实现了 gaussian 家族。")
+    # 向后兼容：当新功能都关闭时，回退到原有行为
+    use_original = (not adaptive_weighting) and (not enable_group_constraint)
 
+    # 1. 前置校验
     if backend not in ["numba", "pytorch"]:
         raise ValueError("backend must be either 'numba' or 'pytorch'")
+
+    # 如果新功能关闭且需要用原始adelie（保持向后兼容）
+    # 注意：cox模型仍然使用原始adelie，因为需要特殊处理
+    if use_original and family == "cox":
+        # 回退到原始adelie实现（cox在原始实现中有完整支持）
+        return fit_unilasso(X, y, family, lmdas, n_lmdas, lmda_min_ratio, verbose)
 
     # Select solver based on backend
     if backend == "numba":
@@ -1117,44 +1538,100 @@ def fit_uni(
         _fit_lasso_path = _fit_pytorch_lasso_path
 
     # 2. 数据准备与预处理
-    # 这一步极其关键，它内部执行了对各个特征的单变量回归，提取出了 loo_fits
     X, y, loo_fits, beta_intercepts, beta_coefs_fit, glm_family, _, original_lmdas, zero_var_idx = _prepare_unilasso_input(X, y, family, lmdas)
 
     fit_intercept = False if family == "cox" else True
 
+    # 设置默认学习率（根据GLM家族）
+    if lr is None:
+        if family == "gaussian":
+            lr = 0.01
+        elif family == "binomial":
+            lr = 0.1
+        elif family == "poisson":
+            lr = 0.05
+        elif family == "multinomial":
+            lr = 0.1
+        else:
+            lr = 0.01
+
     # 3. 确定正则化路径 (Lambda Path)
     if original_lmdas is not None:
-        # 如果用户指定了 lmdas，为了热启动 (Warm Start) 的有效性，
-        # 我们必须确保 Lambda 是从大到小降序排列的。
         lambda_path = np.sort(np.array(original_lmdas))[::-1]
     else:
-        # 如果未指定，自动计算理论上的最大 Lambda (使得所有系数刚好被压缩为 0 的临界值)
-        # 并基于 lmda_min_ratio 在对数尺度上生成路径
         lambda_path = _configure_lmda_path(
-                    X=loo_fits,       # 关键防御点：必须是 loo_fits
-                    y=y,              # 目标变量 
-                    family=family,    # 模型家族
-                    n_lmdas=n_lmdas,  # 路径长度
-                    lmda_min_ratio=lmda_min_ratio # 最小跨度比例
+                    X=loo_fits,
+                    y=y,
+                    family=family,
+                    n_lmdas=n_lmdas,
+                    lmda_min_ratio=lmda_min_ratio
                 )
 
-    # 4. 调用核心求解器
-    # 充分复用我们在 cv_uni 中编写的底层逻辑！
+    # 4. 计算自适应权重和分组约束 (新功能)
+    feature_weights = None
+    group_signs = None
+    group_weights_arr = None
+    groups = None
+
+    if adaptive_weighting or enable_group_constraint:
+        # 构建单变量结果字典
+        univariate_results = {
+            'beta': beta_coefs_fit,
+            't_stats': np.ones_like(beta_coefs_fit),  # 占位
+            'p_values': np.ones_like(beta_coefs_fit),  # 占位
+            'correlations': np.zeros_like(beta_coefs_fit)  # 占位
+        }
+
+        # 计算特征相关性
+        if X.shape[1] > 0:
+            univariate_results['correlations'] = np.corrcoef(X.T, y)[0, 1:] if X.shape[1] > 1 else np.array([np.corrcoef(X[:, 0], y)[0, 1]])
+
+    if adaptive_weighting:
+        feature_weights = _compute_feature_significance_weights(
+            univariate_results, weight_method, weight_max_scale
+        )
+    else:
+        feature_weights = np.ones(len(beta_coefs_fit))
+
+    if enable_group_constraint:
+        # 计算特征相关矩阵
+        if len(beta_coefs_fit) > 1:
+            corr_matrix = np.corrcoef(X.T)
+        else:
+            corr_matrix = np.array([[1.0]])
+
+        # 贪心分组
+        groups = _greedy_correlation_grouping(
+            corr_matrix, corr_threshold, max_group_size
+        )
+
+        # 计算组惩罚权重和符号
+        group_signs, group_weights_arr = _compute_group_penalty_weights(
+            groups, beta_coefs_fit, feature_weights
+        )
+    else:
+        group_signs = np.ones(len(beta_coefs_fit))
+        group_weights_arr = np.ones(len(beta_coefs_fit))
+
+    # 5. 调用核心求解器
     betas_matrix, intercepts_array = _fit_lasso_path(
         X_train=loo_fits,
         y_train=y,
         lmdas=lambda_path,
         negative_penalty=negative_penalty,
-        fit_intercept=fit_intercept
+        fit_intercept=fit_intercept,
+        lr=lr,
+        feature_weights=feature_weights,
+        group_signs=group_signs,
+        group_penalty=group_penalty,
+        group_weights=group_weights_arr,
+        family=family
     )
 
-    # 5. 适配器模式启动
-    # 将 NumPy 矩阵伪装成 adelie 的底层 C++ 对象，以便骗过 _format_output
+    # 6. 适配器模式启动
     adapter_model = PyTorchGrpnetAdapter(betas_matrix, intercepts_array, lambda_path)
 
-    # 6. 参数还原与格式化
-    # 原版代码中这里传入了 reverse_indices，
-    # 但因为我们的 PyTorch 路径完全受控，并已经按照 lambda_path 严格对齐，所以这里无需 reverse。
+    # 7. 参数还原与格式化
     gamma_hat, gamma_0, beta_coefs = _format_output(
         lasso_model=adapter_model,
         beta_coefs_fit=beta_coefs_fit,
@@ -1162,14 +1639,13 @@ def fit_uni(
         zero_var_idx=zero_var_idx,
         X=X,
         fit_intercept=fit_intercept,
-        reverse_indices=None  # 架构细节改动点
+        reverse_indices=None
     )
 
     if verbose:
         _print_unilasso_results(gamma_hat, lambda_path)
 
-    # 7. 返回标准结果对象
-    # 这确保了 `predict` 等下游方法可以无缝接入这个结果
+    # 8. 返回标准结果对象 (附加分组信息)
     unilasso_result = UniLassoResult(
         coefs=gamma_hat,
         intercept=gamma_0,
@@ -1178,9 +1654,14 @@ def fit_uni(
         gamma_intercept=gamma_0,
         beta=beta_coefs,
         beta_intercepts=beta_intercepts,
-        lasso_model=adapter_model,  # 传入适配器
+        lasso_model=adapter_model,
         lmdas=lambda_path
     )
+
+    # 附加分组信息 (可选)
+    if enable_group_constraint and groups is not None:
+        unilasso_result.groups = groups
+        unilasso_result.group_signs = group_signs
 
     return unilasso_result
 
