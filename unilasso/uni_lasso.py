@@ -1625,6 +1625,8 @@ def fit_uni(
     verbose: bool = False,
     backend: str = "numba",
     lr: Optional[float] = None,
+    # 新增：Nesterov动量加速
+    momentum: float = 0.0,
     # 新增：自适应惩罚参数
     adaptive_weighting: bool = False,
     weight_method: str = "t_statistic",
@@ -1789,6 +1791,7 @@ def fit_uni(
         negative_penalty=negative_penalty,
         fit_intercept=fit_intercept,
         lr=lr,
+        momentum=momentum,
         feature_weights=feature_weights,
         group_signs=group_signs,
         group_penalty=group_penalty,

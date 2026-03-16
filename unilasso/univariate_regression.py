@@ -430,6 +430,7 @@ def leave_one_out_multinomial(X: np.ndarray, y: np.ndarray, nit: int = 2) -> Dic
 # Leave-One-Out for Spline Regression
 # ------------------------------------------------------------------------------
 
+@jit(nopython=True, cache=True)
 def _bspline_basis(x: np.ndarray, knots: np.ndarray, degree: int = 3) -> np.ndarray:
     """
     Compute B-spline basis functions for a given x.
@@ -447,11 +448,14 @@ def _bspline_basis(x: np.ndarray, knots: np.ndarray, degree: int = 3) -> np.ndar
     n_basis = n_knots + degree - 1
 
     # Augment knots with boundary knots
-    augmented_knots = np.concatenate([
-        [x[0]] * degree,
-        knots,
-        [x[-1]] * degree
-    ])
+    total_len = 2 * degree + len(knots)
+    augmented_knots = np.zeros(total_len, dtype=x.dtype)
+    for i in range(degree):
+        augmented_knots[i] = x[0]
+    for i in range(len(knots)):
+        augmented_knots[degree + i] = knots[i]
+    for i in range(degree):
+        augmented_knots[degree + len(knots) + i] = x[-1]
 
     # Initialize basis matrix
     basis = np.zeros((n, n_basis))
@@ -470,15 +474,13 @@ def _bspline_basis(x: np.ndarray, knots: np.ndarray, degree: int = 3) -> np.ndar
             denom1 = augmented_knots[i + d] - augmented_knots[i]
             denom2 = augmented_knots[i + d + 1] - augmented_knots[i + 1]
 
+            term1 = np.zeros_like(x)
             if denom1 > 1e-10:
-                term1 = (x - augmented_knots[i]) / denom1 * basis[:, i]
-            else:
-                term1 = 0.0
+                term1[:] = (x - augmented_knots[i]) / denom1 * basis[:, i]
 
+            term2 = np.zeros_like(x)
             if denom2 > 1e-10:
-                term2 = (augmented_knots[i + d + 1] - x) / denom2 * basis[:, i + 1]
-            else:
-                term2 = 0.0
+                term2[:] = (augmented_knots[i + d + 1] - x) / denom2 * basis[:, i + 1]
 
             new_basis[:, i] = term1 + term2
         basis = new_basis

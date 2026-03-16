@@ -331,3 +331,526 @@ if __name__ == "__main__":
     print(f"   Nonzero beta: {np.sum(beta != 0)}")
     print(f"   X correlation structure (first 3x3):")
     print(np.corrcoef(X[:, :3].T).round(2))
+
+
+def simulate_poisson_data(
+    n: int = 500,
+    p: int = 100,
+    sparsity: int = 10,
+    correlation: Literal['independent', 'ar1', 'block'] = 'block',
+    rho: float = 0.7,
+    signal_strength: float = 1.0,
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    生成泊松计数数据。
+
+    模型:
+        log_lambda = X @ beta_true
+        y ~ Poisson(exp(log_lambda))
+
+    Args:
+        n: 样本数量
+        p: 特征数量
+        sparsity: 非零系数数量
+        correlation: 相关性结构 ('independent', 'ar1', 'block')
+        rho: 相关系数
+        signal_strength: 信号强度
+        seed: 随机种子
+
+    Returns:
+        X: 特征矩阵 (n, p)
+        y: 计数响应 (n,)
+        beta_true: 真实系数 (p,)
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 生成协方差矩阵
+    if correlation == 'independent':
+        cov_matrix = np.eye(p)
+    elif correlation == 'ar1':
+        cov_matrix = np.power(rho, np.abs(np.arange(p)[:, None] - np.arange(p)[None, :]))
+    elif correlation == 'block':
+        block_size = 10
+        n_blocks = p // block_size
+        cov_blocks = []
+        for _ in range(n_blocks):
+            block = np.ones((block_size, block_size)) * rho
+            np.fill_diagonal(block, 1.0)
+            cov_blocks.append(block)
+        cov_matrix = np.block([[cov_blocks[i] if i == j else np.zeros((block_size, block_size))
+                                for j in range(n_blocks)] for i in range(n_blocks)])
+        if p % block_size != 0:
+            remaining = p % block_size
+            remaining_cov = np.eye(remaining)
+            cov_matrix = np.block([[cov_matrix, np.zeros((cov_matrix.shape[0], remaining))],
+                                   [np.zeros((remaining, cov_matrix.shape[1])), remaining_cov]])
+    else:
+        raise ValueError(f"Unknown correlation: {correlation}")
+
+    # 生成特征
+    X = np.random.multivariate_normal(np.zeros(p), cov_matrix, size=n)
+
+    # 生成稀疏系数
+    beta_true = np.zeros(p)
+    nonzero_indices = np.random.choice(p, size=sparsity, replace=False)
+    beta_values = np.random.uniform(0.3, signal_strength, size=sparsity)
+    beta_values = beta_values * np.random.choice([-1, 1], size=sparsity)
+    beta_true[nonzero_indices] = beta_values
+
+    # 生成泊松响应
+    log_lambda = X @ beta_true
+    # 截断避免数值问题
+    log_lambda = np.clip(log_lambda, -10, 10)
+    lambda_ = np.exp(log_lambda)
+    y = np.random.poisson(lambda_)
+
+    return X, y, beta_true
+
+
+def simulate_multinomial_data(
+    n: int = 500,
+    p: int = 100,
+    n_classes: int = 3,
+    sparsity_per_class: int = 5,
+    correlation: Literal['independent', 'ar1', 'block'] = 'block',
+    rho: float = 0.7,
+    signal_strength: float = 2.0,
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    生成多类分类数据。
+
+    模型:
+        每个类别 k 有线性预测器: eta_k = X @ beta_k
+        p_k = softmax(eta_1, ..., eta_K)
+        y ~ Multinomial(1, p)
+
+    Args:
+        n: 样本数量
+        p: 特征数量
+        n_classes: 类别数量
+        sparsity_per_class: 每个类别非零系数数量
+        correlation: 相关性结构
+        rho: 相关系数
+        signal_strength: 信号强度
+        seed: 随机种子
+
+    Returns:
+        X: 特征矩阵 (n, p)
+        y: 类别标签 (n,) - 0-based
+        B_true: 真实系数矩阵 (p, n_classes)
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 生成协方差矩阵
+    if correlation == 'independent':
+        cov_matrix = np.eye(p)
+    elif correlation == 'ar1':
+        cov_matrix = np.power(rho, np.abs(np.arange(p)[:, None] - np.arange(p)[None, :]))
+    elif correlation == 'block':
+        block_size = 10
+        n_blocks = p // block_size
+        cov_blocks = []
+        for _ in range(n_blocks):
+            block = np.ones((block_size, block_size)) * rho
+            np.fill_diagonal(block, 1.0)
+            cov_blocks.append(block)
+        cov_matrix = np.block([[cov_blocks[i] if i == j else np.zeros((block_size, block_size))
+                                for j in range(n_blocks)] for i in range(n_blocks)])
+        if p % block_size != 0:
+            remaining = p % block_size
+            remaining_cov = np.eye(remaining)
+            cov_matrix = np.block([[cov_matrix, np.zeros((cov_matrix.shape[0], remaining))],
+                                   [np.zeros((remaining, cov_matrix.shape[1])), remaining_cov]])
+    else:
+        raise ValueError(f"Unknown correlation: {correlation}")
+
+    # 生成特征
+    X = np.random.multivariate_normal(np.zeros(p), cov_matrix, size=n)
+
+    # 生成系数矩阵
+    B_true = np.zeros((p, n_classes))
+    for k in range(n_classes):
+        nonzero_indices = np.random.choice(p, size=sparsity_per_class, replace=False)
+        beta_values = np.random.uniform(0.5, signal_strength, size=sparsity_per_class)
+        beta_values = beta_values * np.random.choice([-1, 1], size=sparsity_per_class)
+        B_true[nonzero_indices, k] = beta_values
+
+    # 计算 softmax 概率
+    eta = X @ B_true  # (n, n_classes)
+    eta = eta - np.max(eta, axis=1, keepdims=True)  # 数值稳定
+    exp_eta = np.exp(eta)
+    probs = exp_eta / np.sum(exp_eta, axis=1, keepdims=True)
+
+    # 采样类别
+    y = np.array([np.random.choice(n_classes, p=p_row) for p_row in probs])
+
+    return X, y, B_true
+
+
+def simulate_nonlinear_gaussian_data(
+    n: int = 500,
+    p: int = 100,
+    n_nonlinear: int = 8,
+    nonlinear_type: Literal['sine', 'quadratic', 'step', 'mixed'] = 'mixed',
+    correlation: Literal['independent', 'ar1', 'block'] = 'block',
+    rho: float = 0.7,
+    noise_std: float = 1.0,
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+    """
+    生成非线性高斯响应数据。
+
+    模型:
+        y = sum_{j in active} f_j(x_j) + noise
+        仅子集特征有非线性效应，保持稀疏性
+
+    Args:
+        n: 样本数量
+        p: 特征数量
+        n_nonlinear: 非线性效应特征数量
+        nonlinear_type: 非线性类型
+        correlation: 相关性结构
+        rho: 相关系数
+        noise_std: 噪声标准差
+        seed: 随机种子
+
+    Returns:
+        X: 特征矩阵 (n, p)
+        y: 响应 (n,)
+        beta_true: 指示哪个特征有效 (p,), 1=有效, 0=无效
+        true_functions: 真实非线性函数列表 (用于绘图对比)
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 生成协方差矩阵
+    if correlation == 'independent':
+        cov_matrix = np.eye(p)
+    elif correlation == 'ar1':
+        cov_matrix = np.power(rho, np.abs(np.arange(p)[:, None] - np.arange(p)[None, :]))
+    elif correlation == 'block':
+        block_size = 10
+        n_blocks = p // block_size
+        cov_blocks = []
+        for _ in range(n_blocks):
+            block = np.ones((block_size, block_size)) * rho
+            np.fill_diagonal(block, 1.0)
+            cov_blocks.append(block)
+        cov_matrix = np.block([[cov_blocks[i] if i == j else np.zeros((block_size, block_size))
+                                for j in range(n_blocks)] for i in range(n_blocks)])
+        if p % block_size != 0:
+            remaining = p % block_size
+            remaining_cov = np.eye(remaining)
+            cov_matrix = np.block([[cov_matrix, np.zeros((cov_matrix.shape[0], remaining))],
+                                   [np.zeros((remaining, cov_matrix.shape[1])), remaining_cov]])
+    else:
+        raise ValueError(f"Unknown correlation: {correlation}")
+
+    # 生成特征
+    X = np.random.multivariate_normal(np.zeros(p), cov_matrix, size=n)
+
+    # 选择哪些特征是非线性的
+    active_indices = np.random.choice(p, size=n_nonlinear, replace=False)
+    beta_true = np.zeros(p)
+    beta_true[active_indices] = 1.0
+
+    # 定义非线性函数
+    def f_sine(x):
+        return 2 * np.sin(2 * x)
+
+    def f_quadratic(x):
+        return 1.5 * (x ** 2 - 1)
+
+    def f_step(x):
+        return 2 * (x > 0) - 1.0
+
+    # 存储真实函数用于绘图
+    true_functions = []
+    function_types = []
+
+    if nonlinear_type == 'mixed':
+        # 混合使用不同类型
+        types = [f_sine, f_quadratic, f_step]
+        for i in range(n_nonlinear):
+            func = np.random.choice(types)
+            function_types.append(func.__name__)
+            true_functions.append((active_indices[i], func))
+    else:
+        func_map = {
+            'sine': f_sine,
+            'quadratic': f_quadratic,
+            'step': f_step
+        }
+        func = func_map[nonlinear_type]
+        for i in range(n_nonlinear):
+            function_types.append(func.__name__)
+            true_functions.append((active_indices[i], func))
+
+    # 计算响应
+    y = np.zeros(n)
+    for idx, func in true_functions:
+        y += func(X[:, idx])
+
+    # 添加噪声
+    y += np.random.normal(0, noise_std, size=n)
+
+    return X, y, beta_true, true_functions
+
+
+def simulate_nonlinear_glm_data(
+    family: Literal['gaussian', 'binomial', 'poisson'],
+    n: int = 500,
+    p: int = 100,
+    n_nonlinear: int = 8,
+    correlation: Literal['independent', 'ar1', 'block'] = 'block',
+    rho: float = 0.7,
+    signal_scale: float = 1.0,
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+    """
+    通用非线性GLM数据生成器。
+
+    模型:
+        eta = sum_{j in active} f_j(x_j)  (f_j 是非线性函数)
+        根据GLM族生成响应:
+        - gaussian: y = eta + noise
+        - binomial: p = sigmoid(eta), y ~ Bernoulli(p)
+        - poisson: log lambda = eta, y ~ Poisson(exp(eta))
+
+    Args:
+        family: GLM族类型
+        n: 样本数量
+        p: 特征数量
+        n_nonlinear: 非线性效应特征数量
+        correlation: 相关性结构
+        rho: 相关系数
+        signal_scale: 信号缩放因子
+        seed: 随机种子
+
+    Returns:
+        X: 特征矩阵 (n, p)
+        y: 响应 (n,)
+        active_true: 指示哪个特征有效 (p,)
+        true_functions: 真实非线性函数列表
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 生成协方差矩阵
+    if correlation == 'independent':
+        cov_matrix = np.eye(p)
+    elif correlation == 'ar1':
+        cov_matrix = np.power(rho, np.abs(np.arange(p)[:, None] - np.arange(p)[None, :]))
+    elif correlation == 'block':
+        block_size = 10
+        n_blocks = p // block_size
+        cov_blocks = []
+        for _ in range(n_blocks):
+            block = np.ones((block_size, block_size)) * rho
+            np.fill_diagonal(block, 1.0)
+            cov_blocks.append(block)
+        cov_matrix = np.block([[cov_blocks[i] if i == j else np.zeros((block_size, block_size))
+                                for j in range(n_blocks)] for i in range(n_blocks)])
+        if p % block_size != 0:
+            remaining = p % block_size
+            remaining_cov = np.eye(remaining)
+            cov_matrix = np.block([[cov_matrix, np.zeros((cov_matrix.shape[0], remaining))],
+                                   [np.zeros((remaining, cov_matrix.shape[1])), remaining_cov]])
+    else:
+        raise ValueError(f"Unknown correlation: {correlation}")
+
+    # 生成特征
+    X = np.random.multivariate_normal(np.zeros(p), cov_matrix, size=n)
+
+    # 选择有效特征
+    active_indices = np.random.choice(p, size=n_nonlinear, replace=False)
+    active_true = np.zeros(p)
+    active_true[active_indices] = 1.0
+
+    # 定义非线性函数集合
+    def f_sine(x):
+        return 2 * np.sin(2 * x)
+
+    def f_quadratic(x):
+        return 1.5 * (x ** 2 - 1)
+
+    def f_step(x):
+        return 2 * (x > 0) - 1.0
+
+    def f_exp(x):
+        return np.exp(x / 2) - np.exp(0.5)
+
+    func_list = [f_sine, f_quadratic, f_step, f_exp]
+
+    # 随机分配函数
+    true_functions = []
+    for idx in active_indices:
+        func = np.random.choice(func_list)
+        true_functions.append((idx, func))
+
+    # 计算eta
+    eta = np.zeros(n)
+    for idx, func in true_functions:
+        eta += signal_scale * 0.8 * func(X[:, idx])
+
+    # 生成响应
+    if family == 'gaussian':
+        noise_std = 1.0
+        y = eta + np.random.normal(0, noise_std, size=n)
+    elif family == 'binomial':
+        # sigmoid
+        eta = np.clip(eta, -10, 10)
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p)
+    elif family == 'poisson':
+        eta = np.clip(eta, -10, 5)
+        lamb = np.exp(eta)
+        y = np.random.poisson(lamb)
+    else:
+        raise ValueError(f"Unknown family: {family}")
+
+    return X, y, active_true, true_functions
+
+
+def simulate_mixed_data(
+    n: int = 500,
+    p: int = 100,
+    n_linear: int = 5,
+    n_nonlinear: int = 5,
+    correlation: Literal['independent', 'ar1', 'block'] = 'block',
+    rho: float = 0.7,
+    snr: float = 2.0,
+    seed: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """
+    生成混合数据：线性 + 非线性 + 无关特征。
+
+    更真实的场景，用于测试特征选择。
+
+    Args:
+        n: 样本数量
+        p: 特征总数
+        n_linear: 线性效应特征数量
+        n_nonlinear: 非线性效应特征数量
+        correlation: 相关性结构
+        rho: 相关系数
+        snr: 信噪比
+        seed: 随机种子
+
+    Returns:
+        X: 特征矩阵 (n, p)
+        y: 响应 (n,)
+        beta_true: 真实系数，0=无关，非零=有效（线性系数，非线性用1标记）
+        info: 额外信息字典，包含哪些是线性/非线性
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # 生成协方差矩阵
+    if correlation == 'independent':
+        cov_matrix = np.eye(p)
+    elif correlation == 'ar1':
+        cov_matrix = np.power(rho, np.abs(np.arange(p)[:, None] - np.arange(p)[None, :]))
+    elif correlation == 'block':
+        block_size = 10
+        n_blocks = p // block_size
+        cov_blocks = []
+        for _ in range(n_blocks):
+            block = np.ones((block_size, block_size)) * rho
+            np.fill_diagonal(block, 1.0)
+            cov_blocks.append(block)
+        cov_matrix = np.block([[cov_blocks[i] if i == j else np.zeros((block_size, block_size))
+                                for j in range(n_blocks)] for i in range(n_blocks)])
+        if p % block_size != 0:
+            remaining = p % block_size
+            remaining_cov = np.eye(remaining)
+            cov_matrix = np.block([[cov_matrix, np.zeros((cov_matrix.shape[0], remaining))],
+                                   [np.zeros((remaining, cov_matrix.shape[1])), remaining_cov]])
+    else:
+        raise ValueError(f"Unknown correlation: {correlation}")
+
+    # 生成特征
+    X = np.random.multivariate_normal(np.zeros(p), cov_matrix, size=n)
+
+    # 随机选择特征
+    all_indices = np.arange(p)
+    np.random.shuffle(all_indices)
+    linear_indices = all_indices[:n_linear]
+    nonlinear_indices = all_indices[n_linear:n_linear + n_nonlinear]
+
+    # 生成线性系数
+    beta_true = np.zeros(p)
+    beta_true[linear_indices] = np.random.uniform(-2.0, 2.0, size=n_linear)
+    beta_true[nonlinear_indices] = 1.0  # 标记为非线性有效
+
+    # 定义非线性函数
+    def f_sine(x):
+        return 2 * np.sin(2 * x)
+
+    def f_quadratic(x):
+        return 1.5 * (x ** 2 - 1)
+
+    def f_step(x):
+        return 2 * (x > 0) - 1.0
+
+    funcs = [f_sine, f_quadratic, f_step]
+
+    # 计算预测值
+    f_pred = np.zeros(n)
+    # 线性部分
+    f_pred += X @ beta_true
+    # 非线性部分 - 线性标记被覆盖，实际是非线性
+    nonlinear_funcs = []
+    for idx in nonlinear_indices:
+        func = np.random.choice(funcs)
+        f_pred += 0.5 * func(X[:, idx])
+        nonlinear_funcs.append((idx, func))
+
+    # 根据信噪比调整噪声
+    signal_var = np.var(f_pred)
+    noise_var = signal_var / snr
+    noise_std = np.sqrt(noise_var)
+    y = f_pred + np.random.normal(0, noise_std, size=n)
+
+    info = {
+        'linear_indices': linear_indices,
+        'nonlinear_indices': nonlinear_indices,
+        'nonlinear_funcs': nonlinear_funcs,
+        'signal_var': signal_var,
+        'noise_var': noise_var,
+        'snr': snr
+    }
+
+    return X, y, beta_true, info
+
+
+def get_data_generator(data_type: str):
+    """
+    根据数据类型返回对应的数据生成函数。
+
+    Args:
+        data_type: 数据类型
+
+    Returns:
+        对应的数据生成函数
+    """
+    generators = {
+        'ar1': generate_ar1_data,
+        'highdim': generate_highdim_correlated_data,
+        'sign_inconsistent': generate_sign_inconsistent_data,
+        'factor': generate_factor_model_data,
+        'poisson': simulate_poisson_data,
+        'multinomial': simulate_multinomial_data,
+        'nonlinear_gaussian': simulate_nonlinear_gaussian_data,
+        'nonlinear_glm': simulate_nonlinear_glm_data,
+        'mixed': simulate_mixed_data,
+    }
+
+    if data_type not in generators:
+        raise ValueError(f"Unknown data type: {data_type}. Available: {list(generators.keys())}")
+
+    return generators[data_type]
